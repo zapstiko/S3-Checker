@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	_ "embed"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -14,18 +15,8 @@ import (
 	"time"
 )
 
-/*
-   s3-checker
-   Only VALID bucket URLs are printed.
-   Clean, deduplicated, script-friendly output.
-*/
-
-// ==================== EMBED ====================
-
 //go:embed common_bucket_prefixes.txt
 var embeddedWordlist string
-
-// ==================== GLOBALS ====================
 
 var environments = []string{
 	"dev", "development", "stage", "s3",
@@ -38,21 +29,13 @@ var (
 	globalWordlist []string
 )
 
-// ==================== BANNER ====================
+// ================= XML STRUCT =================
 
-func banner() {
-	fmt.Println(`
-   ____   _____      _____ _               _
-  / ___| |___ /     / ____| |__   ___  ___| | _____ _ __
-  \___ \   |_ \____| |    | '_ \ / _ \/ __| |/ / _ \ '__|
-   ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
-  |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
-
-            s3-checker — valid bucket mode
-`)
+type ListBucketResult struct {
+	Contents []struct{} `xml:"Contents"`
 }
 
-// ==================== VERBOSE ====================
+// ================= VERBOSE =================
 
 func vprint(format string, a ...any) {
 	if verbose {
@@ -60,13 +43,7 @@ func vprint(format string, a ...any) {
 	}
 }
 
-func logCheck(bucket, url string) {
-	if verbose {
-		fmt.Printf("[CHECK] %s (%s)\n", bucket, url)
-	}
-}
-
-// ==================== WORDLIST INIT ====================
+// ================= WORDLIST =================
 
 func initWordlist(path string) error {
 	var content string
@@ -74,13 +51,11 @@ func initWordlist(path string) error {
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			content = string(data)
-			vprint("[VERBOSE] Using custom wordlist: %s", path)
 		}
 	}
 
 	if content == "" {
 		content = embeddedWordlist
-		vprint("[VERBOSE] Using embedded wordlist")
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(content))
@@ -94,12 +69,10 @@ func initWordlist(path string) error {
 	if len(globalWordlist) == 0 {
 		return fmt.Errorf("wordlist is empty")
 	}
-
-	vprint("[VERBOSE] Loaded wordlist (%d entries)", len(globalWordlist))
 	return nil
 }
 
-// ==================== S3 CHECKER ====================
+// ================= S3 STRUCT =================
 
 type S3 struct {
 	Bucket string
@@ -115,45 +88,53 @@ func NewS3(bucket string) *S3 {
 	}
 }
 
-// -------- VALID BUCKET DETECTOR --------
+// ================= EXISTENCE =================
 
 func (s *S3) Exists() (bool, int) {
-	logCheck(s.Bucket, s.URL)
-
 	resp, err := s.Client.Get(s.URL)
 	if err != nil {
 		return false, 0
 	}
 	defer resp.Body.Close()
 
-	code := resp.StatusCode
-
-	// Only these mean bucket exists
-	switch code {
+	switch resp.StatusCode {
 	case 200, 403:
-		return true, code
+		return true, resp.StatusCode
 	default:
-		return false, code
+		return false, resp.StatusCode
 	}
 }
 
-// ==================== PERMISSION CLASSIFIER ====================
+// ================= REGION =================
+
+func (s *S3) GetRegion() string {
+	req, _ := http.NewRequest("HEAD", s.URL, nil)
+	resp, err := s.Client.Do(req)
+	if err != nil {
+		return "unknown"
+	}
+	defer resp.Body.Close()
+
+	region := resp.Header.Get("x-amz-bucket-region")
+	if region == "" {
+		return "us-east-1"
+	}
+	return region
+}
+
+// ================= PUBLIC CHECK =================
 
 func classifyPermissions(bucket string) string {
-	httpPublic := false
-	awsPublic := false
-
-	// HTTP list probe
 	httpURL := fmt.Sprintf("http://%s.s3.amazonaws.com/?list-type=2", bucket)
+
 	resp, err := http.Get(httpURL)
 	if err == nil && resp.StatusCode == 200 {
-		httpPublic = true
+		return "PUBLIC"
 	}
 	if resp != nil {
 		resp.Body.Close()
 	}
 
-	// AWS CLI probe
 	if useAWS {
 		if _, err := exec.LookPath("aws"); err == nil {
 			cmd := exec.Command(
@@ -162,18 +143,39 @@ func classifyPermissions(bucket string) string {
 				"--no-sign-request",
 			)
 			if err := cmd.Run(); err == nil {
-				awsPublic = true
+				return "PUBLIC"
 			}
 		}
 	}
 
-	if httpPublic || awsPublic {
-		return "PUBLIC"
-	}
 	return "PRIVATE"
 }
 
-// ==================== PERMUTATIONS ====================
+// ================= OBJECT COUNT =================
+
+func getObjectCount(bucket string) int {
+	url := fmt.Sprintf("http://%s.s3.amazonaws.com/?list-type=2", bucket)
+
+	resp, err := http.Get(url)
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return -1
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result ListBucketResult
+	if err := xml.Unmarshal(body, &result); err != nil {
+		return -1
+	}
+
+	return len(result.Contents)
+}
+
+// ================= PERMUTATIONS =================
 
 func generateWordlist(prefix string, words []string) []string {
 	unique := make(map[string]bool)
@@ -209,7 +211,7 @@ func generateWordlist(prefix string, words []string) []string {
 	return result
 }
 
-// ==================== OUTPUT ====================
+// ================= OUTPUT =================
 
 func writeLine(file *os.File, line string) {
 	fmt.Println(line)
@@ -218,11 +220,9 @@ func writeLine(file *os.File, line string) {
 	}
 }
 
-// ==================== LOCAL SCAN ====================
+// ================= SCAN =================
 
 func scanBuckets(list []string, file *os.File) {
-	vprint("[VERBOSE] Starting local scan (%d candidates)", len(list))
-
 	seen := make(map[string]bool)
 
 	for _, word := range list {
@@ -231,148 +231,59 @@ func scanBuckets(list []string, file *os.File) {
 		}
 		seen[word] = true
 
-		b := NewS3(word)
+		s3 := NewS3(word)
 
-		// ✅ ONLY proceed if bucket truly exists
-		exists, code := b.Exists()
+		exists, _ := s3.Exists()
 		if !exists {
 			continue
 		}
 
-		finalPerm := classifyPermissions(b.Bucket)
+		region := s3.GetRegion()
+		perm := classifyPermissions(word)
 
-		line := fmt.Sprintf("%s | %d | %s", b.URL, code, finalPerm)
-		writeLine(file, line)
+		if perm == "PUBLIC" {
+			count := getObjectCount(word)
+			line := fmt.Sprintf(
+				"INFO exists | %s | %s | %s | objects: %d",
+				s3.URL,
+				region,
+				perm,
+				count,
+			)
+			writeLine(file, line)
+		} else {
+			line := fmt.Sprintf(
+				"INFO exists | %s | %s | %s",
+				s3.URL,
+				region,
+				perm,
+			)
+			writeLine(file, line)
+		}
 	}
 }
 
-// ==================== GRAYHAT ====================
-
-func searchGrayHat(keyword string, file *os.File) {
-	apiKey := os.Getenv("GHW_API_KEY")
-	if apiKey == "" {
-		return
-	}
-
-	vprint("[VERBOSE] Querying GrayHatWarfare…")
-
-	url := fmt.Sprintf(
-		"https://buckets.grayhatwarfare.com/api/v1/buckets?keywords=%s",
-		keyword,
-	)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return
-	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	client := &http.Client{Timeout: 12 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	re := regexp.MustCompile(`"bucket"\s*:\s*"([^"]+)"`)
-	matches := re.FindAllStringSubmatch(string(body), -1)
-
-	seen := make(map[string]bool)
-
-	for _, m := range matches {
-		bucket := m[1]
-		if seen[bucket] {
-			continue
-		}
-		seen[bucket] = true
-
-		b := NewS3(bucket)
-
-		exists, code := b.Exists()
-		if !exists {
-			continue
-		}
-
-		finalPerm := classifyPermissions(bucket)
-
-		line := fmt.Sprintf("%s | %d | %s", b.URL, code, finalPerm)
-		writeLine(file, line)
-	}
-}
-
-// ==================== OSINT ====================
-
-func searchOSINT(keyword string, file *os.File) {
-	vprint("[VERBOSE] Querying OSINT.sh…")
-
-	url := fmt.Sprintf("https://osint.sh/buckets/?q=%s", keyword)
-
-	client := &http.Client{Timeout: 12 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-
-	re := regexp.MustCompile(`([a-z0-9\.-]+)\.s3\.amazonaws\.com`)
-	matches := re.FindAllStringSubmatch(string(body), -1)
-
-	seen := make(map[string]bool)
-
-	for _, m := range matches {
-		bucket := m[1]
-		if seen[bucket] {
-			continue
-		}
-		seen[bucket] = true
-
-		b := NewS3(bucket)
-
-		exists, code := b.Exists()
-		if !exists {
-			continue
-		}
-
-		finalPerm := classifyPermissions(bucket)
-
-		line := fmt.Sprintf("%s | %d | %s", b.URL, code, finalPerm)
-		writeLine(file, line)
-	}
-}
-
-// ==================== MAIN ====================
+// ================= MAIN =================
 
 func main() {
 	target := flag.String("t", "", "Target name (required)")
 	wordlistFile := flag.String("w", "", "Wordlist file")
 	outputFile := flag.String("o", "", "Output file")
 	flag.BoolVar(&verbose, "v", false, "Verbose mode")
-	flag.BoolVar(&useAWS, "aws", false, "Verify permissions using AWS CLI")
+	flag.BoolVar(&useAWS, "aws", false, "Use AWS CLI validation")
 	flag.Parse()
-
-	banner()
 
 	if *target == "" {
 		fmt.Println("Usage: s3-checker -t <target>")
-		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
 	if err := initWordlist(*wordlistFile); err != nil {
-		fmt.Println("Error loading wordlist:", err)
+		fmt.Println("Error:", err)
 		return
 	}
 
 	wordlist := generateWordlist(*target, globalWordlist)
-	vprint("[VERBOSE] Generated %d permutations", len(wordlist))
 
 	var file *os.File
 	var err error
@@ -386,6 +297,4 @@ func main() {
 	}
 
 	scanBuckets(wordlist, file)
-	searchGrayHat(*target, file)
-	searchOSINT(*target, file)
 }
