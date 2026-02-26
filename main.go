@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +17,7 @@ import (
 //go:embed common_bucket_prefixes.txt
 var embeddedWordlist string
 
-const version = "v1.2.0"
+const version = "v1.3.0"
 
 // ================= COLORS =================
 
@@ -25,6 +26,7 @@ const (
 	Green  = "\033[32m"
 	Yellow = "\033[33m"
 	Cyan   = "\033[36m"
+	Bold   = "\033[1m"
 	Reset  = "\033[0m"
 )
 
@@ -46,9 +48,52 @@ func colorStatus(code int) string {
 var (
 	client        = &http.Client{Timeout: 6 * time.Second}
 	totalChecks   uint64
-	statusInclude int
-	statusExclude int
+	statusFilter  int
+	excludeStatus = map[int]struct{}{}
 )
+
+// ================= HELP =================
+
+func init() {
+	flag.Usage = func() {
+		fmt.Println(Bold + "s3-checker " + version + Reset)
+		fmt.Println("Fast AWS S3 bucket discovery tool\n")
+
+		fmt.Println(Bold + "Usage:" + Reset)
+		fmt.Println("  s3-checker -t <target> [options]\n")
+
+		fmt.Println(Bold + "Options:" + Reset)
+		flag.PrintDefaults()
+
+		fmt.Println("\n" + Bold + "Examples:" + Reset)
+		fmt.Println("  s3-checker -t example")
+		fmt.Println("  s3-checker -t example -c 200")
+		fmt.Println("  s3-checker -t example -r 50")
+		fmt.Println("  s3-checker -t example -s 200")
+		fmt.Println("  s3-checker -t example -e 403")
+		fmt.Println("  s3-checker -t example -w words.txt -o hits.txt")
+	}
+}
+
+// ================= PARSE EXCLUDE =================
+
+func parseExclude(input string) {
+	if input == "" {
+		return
+	}
+	parts := strings.Split(input, ",")
+	for _, p := range parts {
+		code, err := strconv.Atoi(strings.TrimSpace(p))
+		if err == nil {
+			excludeStatus[code] = struct{}{}
+		}
+	}
+}
+
+func isExcluded(code int) bool {
+	_, ok := excludeStatus[code]
+	return ok
+}
 
 // ================= BANNER =================
 
@@ -76,11 +121,11 @@ func printBanner(target string, total int, concurrency int, rate int) {
 		fmt.Printf("[+] Rate limit   : disabled\n")
 	}
 
-	if statusInclude != 0 {
-		fmt.Printf("[+] Include code : %d\n", statusInclude)
+	if statusFilter != 0 {
+		fmt.Printf("[+] Status filter: %d\n", statusFilter)
 	}
-	if statusExclude != 0 {
-		fmt.Printf("[+] Exclude code : %d\n", statusExclude)
+	if len(excludeStatus) > 0 {
+		fmt.Printf("[+] Exclude codes: enabled\n")
 	}
 
 	fmt.Println()
@@ -192,14 +237,10 @@ func worker(jobs <-chan string, wg *sync.WaitGroup, outFile *os.File, rate <-cha
 		if !exists {
 			continue
 		}
-
-		// include filter
-		if statusInclude != 0 && code != statusInclude {
+		if statusFilter != 0 && code != statusFilter {
 			continue
 		}
-
-		// exclude filter
-		if statusExclude != 0 && code == statusExclude {
+		if isExcluded(code) {
 			continue
 		}
 
@@ -227,18 +268,19 @@ func main() {
 	target := flag.String("t", "", "Target name (required)")
 	wordlistPath := flag.String("w", "", "Custom wordlist")
 	outputPath := flag.String("o", "", "Output file")
-	concurrency := flag.Int("c", 50, "Concurrency")
+	concurrency := flag.Int("c", 50, "Concurrency (workers)")
 	rateLimit := flag.Int("r", 0, "Rate limit (req/sec)")
-	flag.IntVar(&statusInclude, "s", 0, "Include only this status code")
-	flag.IntVar(&statusExclude, "e", 0, "Exclude this status code")
+	exclude := flag.String("e", "", "Exclude status codes (comma-separated)")
+	flag.IntVar(&statusFilter, "s", 0, "Filter by status code")
 	flag.Parse()
 
+	parseExclude(*exclude)
+
 	if *target == "" {
-		fmt.Println("Usage: s3-checker -t <target>")
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	// wordlist selection
 	var words []string
 	var err error
 
@@ -256,7 +298,6 @@ func main() {
 
 	printBanner(*target, len(wordlist), *concurrency, *rateLimit)
 
-	// output file
 	var outFile *os.File
 	if *outputPath != "" {
 		outFile, err = os.Create(*outputPath)
@@ -267,7 +308,6 @@ func main() {
 		defer outFile.Close()
 	}
 
-	// rate limiter
 	var rate <-chan time.Time
 	if *rateLimit > 0 {
 		rate = time.Tick(time.Second / time.Duration(*rateLimit))
