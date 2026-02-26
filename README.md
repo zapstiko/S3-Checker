@@ -49,13 +49,12 @@ export PATH=$PATH:$(go env GOPATH)/bin
 ⸻
 ```
 ## Build from source
-
+```
 git clone https://github.com/zapstiko/s3-checker.git
 cd s3-checker
 go build -o s3-checker
 
-
-⸻
+```
 
 ## Usage
 
