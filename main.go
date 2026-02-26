@@ -3,244 +3,127 @@ package main
 import (
 	"bufio"
 	_ "embed"
-	"encoding/xml"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
 //go:embed common_bucket_prefixes.txt
 var embeddedWordlist string
 
+// ================= COLORS =================
+
+const (
+	Red    = "\033[31m"
+	Green  = "\033[32m"
+	Yellow = "\033[33m"
+	Cyan   = "\033[36m"
+	Reset  = "\033[0m"
+)
+
+func colorStatus(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return Green
+	case code >= 300 && code < 400:
+		return Yellow
+	case code >= 400 && code < 500:
+		return Red
+	default:
+		return Cyan
+	}
+}
+
 // ================= GLOBALS =================
 
 var (
-	verbose        bool
-	useAWS         bool
-	globalWordlist []string
+	client      = &http.Client{Timeout: 6 * time.Second}
+	totalChecks uint64
 )
+
+// ================= S3 =================
+
+func checkBucket(bucket string) (bool, int, string) {
+	url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return false, 0, url
+	}
+	defer resp.Body.Close()
+
+	code := resp.StatusCode
+	return code != 404, code, url
+}
+
+// ================= WORDLIST =================
 
 var environments = []string{
 	"dev", "development", "stage", "s3",
 	"staging", "prod", "production", "test",
 }
 
-// ================= VERBOSE =================
-
-func vprint(format string, a ...any) {
-	if verbose {
-		fmt.Printf(format+"\n", a...)
-	}
-}
-
-// lightweight progress (only in non-verbose mode)
-func progress(bucket string) {
-	if !verbose {
-		fmt.Printf("[+] Checking: %-40s\r", bucket)
-	}
-}
-
-// ================= XML STRUCT =================
-
-type ListBucketResult struct {
-	Contents []struct {
-		Size int64 `xml:"Size"`
-	} `xml:"Contents"`
-}
-
-// ================= WORDLIST =================
-
-func initWordlist(path string) error {
-	var content string
-
-	if path != "" {
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-			content = string(data)
-			vprint("[VERBOSE] Using custom wordlist: %s", path)
-		}
-	}
-
-	if content == "" {
-		content = embeddedWordlist
-		vprint("[VERBOSE] Using embedded wordlist")
-	}
-
-	scanner := bufio.NewScanner(strings.NewReader(content))
+func loadEmbeddedWordlist() []string {
+	var lines []string
+	scanner := bufio.NewScanner(strings.NewReader(embeddedWordlist))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
-			globalWordlist = append(globalWordlist, line)
+			lines = append(lines, line)
 		}
 	}
-
-	vprint("[VERBOSE] Loaded wordlist (%d entries)", len(globalWordlist))
-
-	if len(globalWordlist) == 0 {
-		return fmt.Errorf("wordlist empty")
-	}
-	return nil
+	return lines
 }
 
-// ================= S3 =================
-
-type S3 struct {
-	Bucket string
-	URL    string
-	Client *http.Client
-}
-
-func NewS3(bucket string) *S3 {
-	return &S3{
-		Bucket: bucket,
-		URL:    fmt.Sprintf("http://%s.s3.amazonaws.com", bucket),
-		Client: &http.Client{Timeout: 8 * time.Second},
-	}
-}
-
-// ================= EXISTENCE =================
-
-func (s *S3) Exists() (bool, int) {
-	resp, err := s.Client.Get(s.URL)
+func loadCustomWordlist(path string) ([]string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return false, 0
+		return nil, err
 	}
-	defer resp.Body.Close()
+	defer f.Close()
 
-	code := resp.StatusCode
-
-	// treat these as valid buckets
-	if code == 200 || code == 403 || code == 301 {
-		return true, code
-	}
-
-	return false, code
-}
-
-// ================= REGION =================
-
-func (s *S3) GetRegion() string {
-	req, _ := http.NewRequest("HEAD", s.URL, nil)
-	resp, err := s.Client.Do(req)
-	if err != nil {
-		return "us-east-1"
-	}
-	defer resp.Body.Close()
-
-	r := resp.Header.Get("x-amz-bucket-region")
-	if r == "" {
-		return "us-east-1"
-	}
-	return r
-}
-
-// ================= ACL CHECK =================
-
-func checkACL(bucket string) (authUsers, allUsers string) {
-	authUsers = "[]"
-	allUsers = "[]"
-
-	if !useAWS {
-		return
-	}
-
-	if _, err := exec.LookPath("aws"); err != nil {
-		return
-	}
-
-	cmd := exec.Command(
-		"aws", "s3api", "get-bucket-acl",
-		"--bucket", bucket,
-		"--no-sign-request",
-	)
-
-	out, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	data := strings.ToLower(string(out))
-
-	if strings.Contains(data, "allusers") {
-		if strings.Contains(data, "read_acp") {
-			allUsers = "[READ, READ_ACP]"
-		} else if strings.Contains(data, "read") {
-			allUsers = "[READ]"
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			lines = append(lines, line)
 		}
 	}
-
-	return
+	return lines, scanner.Err()
 }
-
-// ================= BUCKET STATS =================
-
-func getBucketStats(bucket string) (int, int64) {
-	url := fmt.Sprintf("http://%s.s3.amazonaws.com/?list-type=2", bucket)
-
-	resp, err := http.Get(url)
-	if err != nil || resp.StatusCode != 200 {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return 0, 0
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var result ListBucketResult
-	if err := xml.Unmarshal(body, &result); err != nil {
-		return 0, 0
-	}
-
-	var total int64
-	for _, obj := range result.Contents {
-		total += obj.Size
-	}
-
-	return len(result.Contents), total
-}
-
-// ================= SIZE =================
-
-func humanSize(bytes int64) string {
-	if bytes <= 0 {
-		return "0 B"
-	}
-	kb := float64(bytes) / 1024
-	if kb < 1024 {
-		return fmt.Sprintf("%.1f KB", kb)
-	}
-	mb := kb / 1024
-	if mb < 1024 {
-		return fmt.Sprintf("%.1f MB", mb)
-	}
-	gb := mb / 1024
-	return fmt.Sprintf("%.2f GB", gb)
-}
-
-// ================= PERMUTATIONS =================
 
 func generateWordlist(prefix string, words []string) []string {
-	unique := make(map[string]bool)
-	unique[prefix] = true
+	unique := make(map[string]struct{})
+	unique[prefix] = struct{}{}
+
+	envFormats := []string{
+		"%s-%s-%s",
+		"%s-%s.%s",
+		"%s-%s%s",
+		"%s.%s-%s",
+		"%s.%s.%s",
+	}
+
+	hostFormats := []string{"%s.%s", "%s-%s", "%s%s"}
 
 	for _, word := range words {
 		for _, env := range environments {
-			formats := []string{
-				"%s-%s-%s",
-				"%s-%s.%s",
-				"%s-%s%s",
-				"%s.%s-%s",
-				"%s.%s.%s",
+			for _, f := range envFormats {
+				unique[fmt.Sprintf(f, prefix, word, env)] = struct{}{}
 			}
-			for _, f := range formats {
-				unique[fmt.Sprintf(f, prefix, word, env)] = true
-			}
+		}
+	}
+
+	for _, word := range words {
+		for _, f := range hostFormats {
+			unique[fmt.Sprintf(f, prefix, word)] = struct{}{}
+			unique[fmt.Sprintf(f, word, prefix)] = struct{}{}
 		}
 	}
 
@@ -251,113 +134,108 @@ func generateWordlist(prefix string, words []string) []string {
 	return result
 }
 
-// ================= OUTPUT =================
+// ================= WORKER =================
 
-func writeLine(file *os.File, line string) {
-	fmt.Printf("\r%s\n", line) // clear progress line
-	if file != nil {
-		file.WriteString(line + "\n")
-	}
-}
+func worker(jobs <-chan string, wg *sync.WaitGroup, outFile *os.File, rate <-chan time.Time) {
+	defer wg.Done()
 
-// ================= SCAN =================
-
-func scanBuckets(list []string, file *os.File) {
-	vprint("[VERBOSE] Starting local scan (%d candidates)", len(list))
-
-	if len(list) == 0 {
-		fmt.Println("[WARN] zero candidates generated")
-		return
-	}
-
-	seen := make(map[string]bool)
-
-	for _, word := range list {
-		if seen[word] {
-			continue
+	for bucket := range jobs {
+		if rate != nil {
+			<-rate
 		}
-		seen[word] = true
 
-		progress(word)
+		exists, code, url := checkBucket(bucket)
+		atomic.AddUint64(&totalChecks, 1)
 
-		s3 := NewS3(word)
-		exists, code := s3.Exists()
+		// progress line
+		fmt.Printf("\r[+] Checked: %d", atomic.LoadUint64(&totalChecks))
 
-		// always output something
-		if !exists {
+		if exists {
+			color := colorStatus(code)
+
 			line := fmt.Sprintf(
-				"INFO %-10s | %s | status:%d",
-				"not_exist",
-				s3.URL,
+				"%s [%s%d%s] [S3 Bucket Found]",
+				url,
+				color,
 				code,
+				Reset,
 			)
-			writeLine(file, line)
-			continue
+
+			fmt.Printf("\r%s\n", line)
+
+			if outFile != nil {
+				outFile.WriteString(line + "\n")
+			}
 		}
-
-		region := s3.GetRegion()
-		authUsers, allUsers := checkACL(word)
-		count, size := getBucketStats(word)
-
-		if count == 0 {
-			line := fmt.Sprintf(
-				"INFO %-10s | %s | %-10s | PRIVATE",
-				"exists",
-				s3.URL,
-				region,
-			)
-			writeLine(file, line)
-			continue
-		}
-
-		line := fmt.Sprintf(
-			"INFO %-10s | %s | %-10s | AuthUsers:%s | AllUsers:%s | %d objects (%s)",
-			"exists",
-			s3.URL,
-			region,
-			authUsers,
-			allUsers,
-			count,
-			humanSize(size),
-		)
-
-		writeLine(file, line)
 	}
 }
 
 // ================= MAIN =================
 
 func main() {
-	target := flag.String("t", "", "Target (required)")
-	wordlistFile := flag.String("w", "", "Wordlist")
-	outputFile := flag.String("o", "", "Output file")
-	flag.BoolVar(&verbose, "v", false, "Verbose mode")
-	flag.BoolVar(&useAWS, "aws", false, "Use AWS CLI ACL check")
+	target := flag.String("t", "", "Target name (required)")
+	wordlistPath := flag.String("w", "", "Custom wordlist")
+	outputPath := flag.String("o", "", "Output file")
+	concurrency := flag.Int("c", 50, "Concurrency")
+	rateLimit := flag.Int("rate", 0, "Requests per second (optional)")
 	flag.Parse()
 
 	if *target == "" {
-		fmt.Println("Usage: s3-checker -t <target>")
+		fmt.Println("Usage: s3-checker -t <target> [-w wordlist] [-o output]")
 		os.Exit(1)
 	}
 
-	if err := initWordlist(*wordlistFile); err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
-
-	wordlist := generateWordlist(*target, globalWordlist)
-	vprint("[VERBOSE] Generated %d permutations", len(wordlist))
-
-	var file *os.File
+	// wordlist selection
+	var words []string
 	var err error
-	if *outputFile != "" {
-		file, err = os.Create(*outputFile)
+
+	if *wordlistPath != "" {
+		words, err = loadCustomWordlist(*wordlistPath)
 		if err != nil {
-			fmt.Println("Output error:", err)
-			return
+			fmt.Println("Error loading wordlist:", err)
+			os.Exit(1)
 		}
-		defer file.Close()
+	} else {
+		words = loadEmbeddedWordlist()
 	}
 
-	scanBuckets(wordlist, file)
+	wordlist := generateWordlist(*target, words)
+
+	fmt.Printf("Generated %d bucket permutations\n", len(wordlist))
+	fmt.Printf("Concurrency: %d\n\n", *concurrency)
+
+	// output file
+	var outFile *os.File
+	if *outputPath != "" {
+		outFile, err = os.Create(*outputPath)
+		if err != nil {
+			fmt.Println("Error creating output file:", err)
+			os.Exit(1)
+		}
+		defer outFile.Close()
+	}
+
+	// rate limiter
+	var rate <-chan time.Time
+	if *rateLimit > 0 {
+		rate = time.Tick(time.Second / time.Duration(*rateLimit))
+	}
+
+	jobs := make(chan string, *concurrency)
+	var wg sync.WaitGroup
+
+	// start workers
+	for i := 0; i < *concurrency; i++ {
+		wg.Add(1)
+		go worker(jobs, &wg, outFile, rate)
+	}
+
+	// feed jobs
+	for _, bucket := range wordlist {
+		jobs <- bucket
+	}
+	close(jobs)
+
+	wg.Wait()
+	fmt.Printf("\n\nDone. Checked %d buckets.\n", totalChecks)
 }
