@@ -17,7 +17,7 @@ import (
 //go:embed common_bucket_prefixes.txt
 var embeddedWordlist string
 
-const version = "v1.3.0"
+const version = "v1.3.1"
 
 // ================= COLORS =================
 
@@ -52,7 +52,7 @@ var (
 	excludeStatus = map[int]struct{}{}
 )
 
-// ================= HELP =================
+// ================= HELP MENU =================
 
 func init() {
 	flag.Usage = func() {
@@ -270,9 +270,10 @@ func main() {
 	rateLimit := flag.Int("r", 0, "Rate limit (req/sec)")
 	exclude := flag.String("e", "", "Exclude status codes (comma-separated)")
 	flag.IntVar(&statusFilter, "s", 0, "Filter by status code")
-	flag.Parse()
 
-	parseExclude(*exclude)
+	flag.Parse() // ✅ MUST come after ALL flag definitions
+
+	parseExclude(*exclude) // ✅ MUST come after Parse
 
 	if *target == "" {
 		flag.Usage()
