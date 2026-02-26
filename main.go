@@ -49,8 +49,6 @@ func banner() {
   |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
 
             s3-checker — S3 Bucket Discovery Tool
-            github.com/zapstiko/s3-checker
-            Abu Raihan Biswas (zapstiko)
 `)
 }
 
@@ -143,40 +141,40 @@ func (s *S3) Check() (int, string) {
 	}
 }
 
-// ==================== AWS PERMISSION CHECK ====================
+// ==================== FINAL PERMISSION CLASSIFIER ====================
 
-func awsPermissionCheck(bucket string) string {
-	if !useAWS {
-		return ""
+func classifyPermissions(bucket string) string {
+	httpPublic := false
+	awsPublic := false
+
+	// ---------- HTTP LIST CHECK ----------
+	httpURL := fmt.Sprintf("http://%s.s3.amazonaws.com/?list-type=2", bucket)
+	resp, err := http.Get(httpURL)
+	if err == nil && resp.StatusCode == 200 {
+		httpPublic = true
+	}
+	if resp != nil {
+		resp.Body.Close()
 	}
 
-	// ensure aws cli exists
-	if _, err := exec.LookPath("aws"); err != nil {
-		vprint("[VERBOSE] aws CLI not found — skipping AWS check")
-		return ""
+	// ---------- AWS CLI CHECK ----------
+	if useAWS {
+		if _, err := exec.LookPath("aws"); err == nil {
+			cmd := exec.Command(
+				"aws", "s3", "ls",
+				fmt.Sprintf("s3://%s", bucket),
+				"--no-sign-request",
+			)
+			if err := cmd.Run(); err == nil {
+				awsPublic = true
+			}
+		}
 	}
 
-	cmd := exec.Command(
-		"aws", "s3", "ls",
-		fmt.Sprintf("s3://%s", bucket),
-		"--no-sign-request",
-	)
-
-	out, err := cmd.CombinedOutput()
-	output := strings.ToLower(string(out))
-
-	// publicly listable
-	if err == nil {
+	if httpPublic || awsPublic {
 		return "PUBLIC"
 	}
-
-	// exists but private
-	if strings.Contains(output, "access denied") ||
-		strings.Contains(output, "all access disabled") {
-		return "PRIVATE"
-	}
-
-	return ""
+	return "PRIVATE"
 }
 
 // ==================== PERMUTATIONS ====================
@@ -233,15 +231,16 @@ func scanBuckets(list []string, file *os.File) {
 		b := NewS3(word)
 		code, perm := b.Check()
 
-		// AWS verification overrides HTTP result
-		awsPerm := awsPermissionCheck(b.Bucket)
-		if awsPerm != "" {
-			perm = awsPerm
-		}
-
 		if perm == "" {
 			continue
 		}
+
+		// final clean classification
+		finalPerm := classifyPermissions(b.Bucket)
+		perm = finalPerm
+
+		fmt.Printf("Testing: %s FOUND! (%d)\n", b.Bucket, code)
+		fmt.Printf("Permissions: %s\n", finalPerm)
 
 		url := fmt.Sprintf("http://%s.s3.amazonaws.com", b.Bucket)
 		line := fmt.Sprintf("%s | %d | %s", url, code, perm)
@@ -294,15 +293,15 @@ func searchGrayHat(keyword string, file *os.File) {
 
 		b := NewS3(bucket)
 		code, perm := b.Check()
-
-		awsPerm := awsPermissionCheck(bucket)
-		if awsPerm != "" {
-			perm = awsPerm
-		}
-
 		if perm == "" {
 			continue
 		}
+
+		finalPerm := classifyPermissions(bucket)
+		perm = finalPerm
+
+		fmt.Printf("Testing: %s FOUND! (%d)\n", bucket, code)
+		fmt.Printf("Permissions: %s\n", finalPerm)
 
 		url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
 		line := fmt.Sprintf("%s | %d | %s", url, code, perm)
@@ -343,15 +342,15 @@ func searchOSINT(keyword string, file *os.File) {
 
 		b := NewS3(bucket)
 		code, perm := b.Check()
-
-		awsPerm := awsPermissionCheck(bucket)
-		if awsPerm != "" {
-			perm = awsPerm
-		}
-
 		if perm == "" {
 			continue
 		}
+
+		finalPerm := classifyPermissions(bucket)
+		perm = finalPerm
+
+		fmt.Printf("Testing: %s FOUND! (%d)\n", bucket, code)
+		fmt.Printf("Permissions: %s\n", finalPerm)
 
 		url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
 		line := fmt.Sprintf("%s | %d | %s", url, code, perm)
