@@ -41,7 +41,6 @@ go install github.com/zapstiko/s3-checker@latest
 ```
 export PATH=$PATH:$(go env GOPATH)/bin
 ```
-```
 ## Build from source
 ```
 git clone https://github.com/zapstiko/s3-checker.git
