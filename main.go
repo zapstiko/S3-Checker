@@ -15,24 +15,29 @@ import (
 
 /*
    s3-checker
-   Professional AWS S3 Bucket Discovery & Permission Auditor
+   AWS S3 Bucket Discovery & Permission Auditor
    Developed by Abu Raihan Biswas (zapstiko)
-   GitHub: https://github.com/zapstiko/s3-checker
 */
+
+// ==================== EMBED ====================
 
 //go:embed common_bucket_prefixes.txt
 var embeddedWordlist string
+
+// ==================== GLOBALS ====================
 
 var environments = []string{
 	"dev", "development", "stage", "s3",
 	"staging", "prod", "production", "test",
 }
 
-var verbose bool
+var (
+	verbose        bool
+	globalWordlist []string
+)
 
-// --------------------
-// Banner
-// --------------------
+// ==================== BANNER ====================
+
 func banner() {
 	fmt.Println(`
    ____   _____      _____ _               _
@@ -40,56 +45,64 @@ func banner() {
   \___ \   |_ \____| |    | '_ \ / _ \/ __| |/ / _ \ '__|
    ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
   |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
-  
-        Automated S3 Bucket Discovery & Permission Auditor
-        GitHub: github.com/zapstiko/s3-checker
-        Author : Abu Raihan Biswas (zapstiko)
+
+            s3-checker — S3 Bucket Discovery Tool
+            github.com/zapstiko/s3-checker
+            Abu Raihan Biswas (zapstiko)
 `)
 }
 
-// --------------------
-// Verbose logger
-// --------------------
+// ==================== VERBOSE ====================
+
 func vprint(format string, a ...any) {
 	if verbose {
 		fmt.Printf(format+"\n", a...)
 	}
 }
 
-// --------------------
-// Load wordlist (embedded fallback)
-// --------------------
-func loadWordlist(path string) ([]string, error) {
+func vcheck(url string) {
+	if verbose {
+		fmt.Printf("[CHECK] %s\n", url)
+	}
+}
+
+// ==================== WORDLIST INIT ====================
+
+func initWordlist(path string) error {
 	var content string
 
+	// try custom file first
 	if path != "" {
-		data, err := os.ReadFile(path)
-		if err == nil {
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			content = string(data)
-			vprint("[VERBOSE] Loaded external wordlist: %s", path)
+			vprint("[VERBOSE] Using custom wordlist: %s", path)
 		}
 	}
 
+	// fallback to embedded
 	if content == "" {
 		content = embeddedWordlist
-		vprint("[VERBOSE] Using embedded wordlist")
+		vprint("[VERBOSE] Using embedded wordlist (default)")
 	}
 
-	var words []string
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
-			words = append(words, line)
+			globalWordlist = append(globalWordlist, line)
 		}
 	}
 
-	return words, nil
+	if len(globalWordlist) == 0 {
+		return fmt.Errorf("wordlist is empty")
+	}
+
+	vprint("[VERBOSE] Loaded wordlist (%d entries)", len(globalWordlist))
+	return nil
 }
 
-// --------------------
-// S3 checker
-// --------------------
+// ==================== S3 CHECKER ====================
+
 type S3 struct {
 	Bucket string
 	Domain string
@@ -105,11 +118,10 @@ func NewS3(bucket string) *S3 {
 }
 
 func (s *S3) Check() (int, string) {
-	vprint("[VERBOSE] Checking %s", s.Domain)
+	vcheck(s.Domain)
 
 	resp, err := s.Client.Get(s.Domain)
 	if err != nil {
-		vprint("[VERBOSE] Error: %v", err)
 		return 0, ""
 	}
 	defer resp.Body.Close()
@@ -124,9 +136,8 @@ func (s *S3) Check() (int, string) {
 	}
 }
 
-// --------------------
-// Wordlist generator
-// --------------------
+// ==================== PERMUTATION ENGINE ====================
+
 func generateWordlist(prefix string, words []string) []string {
 	unique := make(map[string]bool)
 	unique[prefix] = true
@@ -161,9 +172,8 @@ func generateWordlist(prefix string, words []string) []string {
 	return result
 }
 
-// --------------------
-// Output helper
-// --------------------
+// ==================== OUTPUT ====================
+
 func writeLine(file *os.File, line string) {
 	fmt.Println(line)
 	if file != nil {
@@ -171,9 +181,8 @@ func writeLine(file *os.File, line string) {
 	}
 }
 
-// --------------------
-// Local scan
-// --------------------
+// ==================== LOCAL SCAN ====================
+
 func scanBuckets(list []string, file *os.File) {
 	vprint("[VERBOSE] Starting local scan (%d candidates)", len(list))
 
@@ -190,13 +199,11 @@ func scanBuckets(list []string, file *os.File) {
 	}
 }
 
-// --------------------
-// GrayHat search
-// --------------------
+// ==================== GRAYHAT ====================
+
 func searchGrayHat(keyword string, file *os.File) {
 	apiKey := os.Getenv("GHW_API_KEY")
 	if apiKey == "" {
-		vprint("[VERBOSE] GrayHat skipped (no API key)")
 		return
 	}
 
@@ -247,9 +254,8 @@ func searchGrayHat(keyword string, file *os.File) {
 	}
 }
 
-// --------------------
-// OSINT search
-// --------------------
+// ==================== OSINT.SH ====================
+
 func searchOSINT(keyword string, file *os.File) {
 	vprint("[VERBOSE] Querying OSINT.sh…")
 
@@ -291,9 +297,8 @@ func searchOSINT(keyword string, file *os.File) {
 	}
 }
 
-// --------------------
-// main
-// --------------------
+// ==================== MAIN ====================
+
 func main() {
 	target := flag.String("t", "", "Target name (required)")
 	wordlistFile := flag.String("w", "", "Wordlist file")
@@ -309,6 +314,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// init wordlist globally
+	if err := initWordlist(*wordlistFile); err != nil {
+		fmt.Println("Error loading wordlist:", err)
+		return
+	}
+
+	wordlist := generateWordlist(*target, globalWordlist)
+	vprint("[VERBOSE] Generated %d permutations", len(wordlist))
+
+	// output file
 	var file *os.File
 	var err error
 	if *outputFile != "" {
@@ -319,14 +334,6 @@ func main() {
 		}
 		defer file.Close()
 	}
-
-	words, err := loadWordlist(*wordlistFile)
-	if err != nil {
-		fmt.Println("Error loading wordlist:", err)
-		return
-	}
-
-	wordlist := generateWordlist(*target, words)
 
 	scanBuckets(wordlist, file)
 	searchGrayHat(*target, file)
