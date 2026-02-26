@@ -271,9 +271,9 @@ func main() {
 	exclude := flag.String("e", "", "Exclude status codes (comma-separated)")
 	flag.IntVar(&statusFilter, "s", 0, "Filter by status code")
 
-	flag.Parse() // ✅ MUST come after ALL flag definitions
+	flag.Parse()
 
-	parseExclude(*exclude) // ✅ MUST come after Parse
+	parseExclude(*exclude)
 
 	if *target == "" {
 		flag.Usage()
