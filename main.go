@@ -30,7 +30,7 @@ var environments = []string{
 	"staging", "prod", "production", "test",
 }
 
-// ================= XML STRUCTS =================
+// ================= XML =================
 
 type ListBucketResult struct {
 	Contents []struct {
@@ -67,7 +67,7 @@ func initWordlist(path string) error {
 	return nil
 }
 
-// ================= S3 STRUCT =================
+// ================= S3 =================
 
 type S3 struct {
 	Bucket string
@@ -119,31 +119,41 @@ func (s *S3) GetRegion() string {
 
 // ================= PUBLIC CHECK =================
 
-func isPublic(bucket string) bool {
-	url := fmt.Sprintf("http://%s.s3.amazonaws.com/?list-type=2", bucket)
+func checkACL(bucket string) (authUsers, allUsers string) {
+	// default
+	authUsers = "[]"
+	allUsers = "[]"
 
-	resp, err := http.Get(url)
-	if err == nil && resp.StatusCode == 200 {
-		return true
-	}
-	if resp != nil {
-		resp.Body.Close()
+	if !useAWS {
+		return
 	}
 
-	if useAWS {
-		if _, err := exec.LookPath("aws"); err == nil {
-			cmd := exec.Command(
-				"aws", "s3", "ls",
-				fmt.Sprintf("s3://%s", bucket),
-				"--no-sign-request",
-			)
-			if err := cmd.Run(); err == nil {
-				return true
-			}
+	if _, err := exec.LookPath("aws"); err != nil {
+		return
+	}
+
+	cmd := exec.Command(
+		"aws", "s3api", "get-bucket-acl",
+		"--bucket", bucket,
+		"--no-sign-request",
+	)
+
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	data := strings.ToLower(string(out))
+
+	if strings.Contains(data, "allusers") {
+		if strings.Contains(data, "read_acp") {
+			allUsers = "[READ, READ_ACP]"
+		} else if strings.Contains(data, "read") {
+			allUsers = "[READ]"
 		}
 	}
 
-	return false
+	return
 }
 
 // ================= OBJECT STATS =================
@@ -156,7 +166,7 @@ func getBucketStats(bucket string) (int, int64) {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		return -1, 0
+		return 0, 0
 	}
 	defer resp.Body.Close()
 
@@ -164,7 +174,7 @@ func getBucketStats(bucket string) (int, int64) {
 
 	var result ListBucketResult
 	if err := xml.Unmarshal(body, &result); err != nil {
-		return -1, 0
+		return 0, 0
 	}
 
 	var total int64
@@ -175,7 +185,7 @@ func getBucketStats(bucket string) (int, int64) {
 	return len(result.Contents), total
 }
 
-// ================= SIZE FORMAT =================
+// ================= SIZE =================
 
 func humanSize(bytes int64) string {
 	if bytes < 1024 {
@@ -214,14 +224,6 @@ func generateWordlist(prefix string, words []string) []string {
 		}
 	}
 
-	for _, word := range words {
-		formats := []string{"%s.%s", "%s-%s", "%s%s"}
-		for _, f := range formats {
-			unique[fmt.Sprintf(f, prefix, word)] = true
-			unique[fmt.Sprintf(f, word, prefix)] = true
-		}
-	}
-
 	var result []string
 	for k := range unique {
 		result = append(result, k)
@@ -243,31 +245,33 @@ func scanBuckets(list []string, file *os.File) {
 		s3 := NewS3(word)
 
 		exists, _ := s3.Exists()
+
 		if !exists {
+			line := fmt.Sprintf(
+				"INFO %-10s | %s",
+				"not_exist",
+				s3.URL,
+			)
+			writeLine(file, line)
 			continue
 		}
 
 		region := s3.GetRegion()
-		public := isPublic(word)
+		authUsers, allUsers := checkACL(word)
+		count, size := getBucketStats(word)
 
-		if public {
-			count, size := getBucketStats(word)
-			line := fmt.Sprintf(
-				"INFO exists | %s | %s | PUBLIC | AllUsers:[READ] | %d objects (%s)",
-				s3.URL,
-				region,
-				count,
-				humanSize(size),
-			)
-			writeLine(file, line)
-		} else {
-			line := fmt.Sprintf(
-				"INFO exists | %s | %s | PRIVATE",
-				s3.URL,
-				region,
-			)
-			writeLine(file, line)
-		}
+		line := fmt.Sprintf(
+			"INFO %-10s | %s | %-10s | AuthUsers: %s | AllUsers: %s | %d objects (%s)",
+			"exists",
+			s3.URL,
+			region,
+			authUsers,
+			allUsers,
+			count,
+			humanSize(size),
+		)
+
+		writeLine(file, line)
 	}
 }
 
@@ -287,7 +291,7 @@ func main() {
 	wordlistFile := flag.String("w", "", "Wordlist")
 	outputFile := flag.String("o", "", "Output file")
 	flag.BoolVar(&verbose, "v", false, "Verbose")
-	flag.BoolVar(&useAWS, "aws", false, "Use AWS CLI")
+	flag.BoolVar(&useAWS, "aws", false, "Use AWS CLI ACL check")
 	flag.Parse()
 
 	if *target == "" {
