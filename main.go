@@ -83,7 +83,7 @@ func NewS3(bucket string) *S3 {
 	}
 }
 
-// ================= EXISTENCE =================
+// ================= EXISTENCE (HARDENED) =================
 
 func (s *S3) Exists() (bool, int) {
 	resp, err := s.Client.Get(s.URL)
@@ -92,12 +92,14 @@ func (s *S3) Exists() (bool, int) {
 	}
 	defer resp.Body.Close()
 
-	switch resp.StatusCode {
-	case 200, 403:
-		return true, resp.StatusCode
-	default:
-		return false, resp.StatusCode
+	code := resp.StatusCode
+
+	// ✅ Elite detection (important fix)
+	if code == 200 || code == 403 || code == 301 {
+		return true, code
 	}
+
+	return false, code
 }
 
 // ================= REGION =================
@@ -184,7 +186,7 @@ func getBucketStats(bucket string) (int, int64) {
 	return len(result.Contents), total
 }
 
-// ================= SIZE FORMAT =================
+// ================= SIZE =================
 
 func humanSize(bytes int64) string {
 	if bytes <= 0 {
@@ -242,6 +244,11 @@ func writeLine(file *os.File, line string) {
 // ================= ELITE SCAN =================
 
 func scanBuckets(list []string, file *os.File) {
+	if len(list) == 0 {
+		fmt.Println("[WARN] zero candidates generated")
+		return
+	}
+
 	seen := make(map[string]bool)
 
 	for _, word := range list {
@@ -254,7 +261,7 @@ func scanBuckets(list []string, file *os.File) {
 
 		exists, code := s3.Exists()
 
-		// ✅ ALWAYS PRINT (professional behavior)
+		// ✅ ALWAYS PRINT
 		if !exists {
 			line := fmt.Sprintf(
 				"INFO %-10s | %s | status:%d",
@@ -264,72 +271,4 @@ func scanBuckets(list []string, file *os.File) {
 			)
 			writeLine(file, line)
 			continue
-		}
-
-		region := s3.GetRegion()
-		authUsers, allUsers := checkACL(word)
-		count, size := getBucketStats(word)
-
-		// Private bucket handling
-		if count == 0 {
-			line := fmt.Sprintf(
-				"INFO %-10s | %s | %-10s | PRIVATE",
-				"exists",
-				s3.URL,
-				region,
-			)
-			writeLine(file, line)
-			continue
-		}
-
-		// Public bucket full info
-		line := fmt.Sprintf(
-			"INFO %-10s | %s | %-10s | AuthUsers:%s | AllUsers:%s | %d objects (%s)",
-			"exists",
-			s3.URL,
-			region,
-			authUsers,
-			allUsers,
-			count,
-			humanSize(size),
-		)
-
-		writeLine(file, line)
-	}
-}
-
-// ================= MAIN =================
-
-func main() {
-	target := flag.String("t", "", "Target (required)")
-	wordlistFile := flag.String("w", "", "Wordlist")
-	outputFile := flag.String("o", "", "Output file")
-	flag.BoolVar(&verbose, "v", false, "Verbose")
-	flag.BoolVar(&useAWS, "aws", false, "Use AWS CLI ACL check")
-	flag.Parse()
-
-	if *target == "" {
-		fmt.Println("Usage: s3-checker -t <target>")
-		os.Exit(1)
-	}
-
-	if err := initWordlist(*wordlistFile); err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
-
-	wordlist := generateWordlist(*target, globalWordlist)
-
-	var file *os.File
-	var err error
-	if *outputFile != "" {
-		file, err = os.Create(*outputFile)
-		if err != nil {
-			fmt.Println("Output error:", err)
-			return
-		}
-		defer file.Close()
-	}
-
-	scanBuckets(wordlist, file)
-}
+		
