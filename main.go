@@ -16,8 +16,7 @@ import (
 
 /*
    s3-checker
-   Professional S3 bucket validator + permission checker
-   Clean single-line output
+   Valid-bucket aware + clean single output
    Developed by Abu Raihan Biswas (zapstiko)
 */
 
@@ -100,35 +99,47 @@ func initWordlist(path string) error {
 	return nil
 }
 
-// ==================== VALID BUCKET CHECK ====================
+// ==================== S3 CHECKER ====================
 
-func isValidBucket(bucket string) (int, bool) {
-	url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
+type S3 struct {
+	Bucket string
+	Domain string
+	Client *http.Client
+}
 
-	client := &http.Client{Timeout: 6 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return 0, false
-	}
-	defer resp.Body.Close()
-
-	bodyBytes := make([]byte, 512)
-	n, _ := resp.Body.Read(bodyBytes)
-	body := strings.ToLower(string(bodyBytes[:n]))
-
-	if strings.Contains(body, "nosuchbucket") {
-		return resp.StatusCode, false
-	}
-
-	switch resp.StatusCode {
-	case 200, 301, 403:
-		return resp.StatusCode, true
-	default:
-		return resp.StatusCode, false
+func NewS3(bucket string) *S3 {
+	return &S3{
+		Bucket: bucket,
+		Domain: fmt.Sprintf("http://%s.s3.amazonaws.com", bucket),
+		Client: &http.Client{Timeout: 6 * time.Second},
 	}
 }
 
-// ==================== PERMISSION CLASSIFIER ====================
+// -------- VALID BUCKET DETECTOR (NEW) --------
+
+func (s *S3) Exists() (bool, int) {
+	logCheck(s.Bucket, s.Domain)
+
+	resp, err := s.Client.Get(s.Domain)
+	if err != nil {
+		return false, 0
+	}
+	defer resp.Body.Close()
+
+	code := resp.StatusCode
+
+	// VALID bucket indicators
+	switch code {
+	case 200, 403:
+		return true, code
+	case 404:
+		return false, code
+	default:
+		return false, code
+	}
+}
+
+// ==================== FINAL PERMISSION CLASSIFIER ====================
 
 func classifyPermissions(bucket string) string {
 	httpPublic := false
@@ -222,16 +233,17 @@ func scanBuckets(list []string, file *os.File) {
 		}
 		seen[word] = true
 
-		code, valid := isValidBucket(word)
-		if !valid {
+		b := NewS3(word)
+
+		// ✅ NEW: strict existence check
+		exists, code := b.Exists()
+		if !exists {
 			continue
 		}
 
-		logCheck(word, fmt.Sprintf("http://%s.s3.amazonaws.com", word))
+		finalPerm := classifyPermissions(b.Bucket)
 
-		finalPerm := classifyPermissions(word)
-
-		url := fmt.Sprintf("http://%s.s3.amazonaws.com", word)
+		url := fmt.Sprintf("http://%s.s3.amazonaws.com", b.Bucket)
 		line := fmt.Sprintf("%s | %d | %s", url, code, finalPerm)
 		writeLine(file, line)
 	}
@@ -259,7 +271,7 @@ func searchGrayHat(keyword string, file *os.File) {
 
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 12 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -280,8 +292,9 @@ func searchGrayHat(keyword string, file *os.File) {
 		}
 		seen[bucket] = true
 
-		code, valid := isValidBucket(bucket)
-		if !valid {
+		b := NewS3(bucket)
+		exists, code := b.Exists()
+		if !exists {
 			continue
 		}
 
@@ -300,7 +313,7 @@ func searchOSINT(keyword string, file *os.File) {
 
 	url := fmt.Sprintf("https://osint.sh/buckets/?q=%s", keyword)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 12 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
 		return
@@ -324,8 +337,9 @@ func searchOSINT(keyword string, file *os.File) {
 		}
 		seen[bucket] = true
 
-		code, valid := isValidBucket(bucket)
-		if !valid {
+		b := NewS3(bucket)
+		exists, code := b.Exists()
+		if !exists {
 			continue
 		}
 
