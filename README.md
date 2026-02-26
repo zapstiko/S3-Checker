@@ -36,11 +36,11 @@ Designed for bug bounty hunters, cloud security engineers, and red team operator
 
 ```bash
 go install github.com/zapstiko/s3-checker@latest
-
-Ensure your Go binary path is available:
-
+```
+#### Ensure your Go binary path is available:
+```
 export PATH=$PATH:$(go env GOPATH)/bin
-
+```
 ```
 ## Build from source
 ```
