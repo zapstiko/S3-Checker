@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ var environments = []string{
 
 var (
 	verbose        bool
+	useAWS         bool
 	globalWordlist []string
 )
 
@@ -52,7 +54,7 @@ func banner() {
 `)
 }
 
-// ==================== VERBOSE ====================
+// ==================== LOGGING ====================
 
 func vprint(format string, a ...any) {
 	if verbose {
@@ -60,7 +62,13 @@ func vprint(format string, a ...any) {
 	}
 }
 
-func vcheck(url string) {
+func normalCheck(bucket string) {
+	if !verbose {
+		fmt.Printf("[+] Checking %s\n", bucket)
+	}
+}
+
+func verboseCheck(url string) {
 	if verbose {
 		fmt.Printf("[CHECK] %s\n", url)
 	}
@@ -71,7 +79,6 @@ func vcheck(url string) {
 func initWordlist(path string) error {
 	var content string
 
-	// try custom file first
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			content = string(data)
@@ -79,7 +86,6 @@ func initWordlist(path string) error {
 		}
 	}
 
-	// fallback to embedded
 	if content == "" {
 		content = embeddedWordlist
 		vprint("[VERBOSE] Using embedded wordlist (default)")
@@ -118,7 +124,8 @@ func NewS3(bucket string) *S3 {
 }
 
 func (s *S3) Check() (int, string) {
-	vcheck(s.Domain)
+	normalCheck(s.Bucket)
+	verboseCheck(s.Domain)
 
 	resp, err := s.Client.Get(s.Domain)
 	if err != nil {
@@ -136,7 +143,43 @@ func (s *S3) Check() (int, string) {
 	}
 }
 
-// ==================== PERMUTATION ENGINE ====================
+// ==================== AWS PERMISSION CHECK ====================
+
+func awsPermissionCheck(bucket string) string {
+	if !useAWS {
+		return ""
+	}
+
+	// ensure aws cli exists
+	if _, err := exec.LookPath("aws"); err != nil {
+		vprint("[VERBOSE] aws CLI not found — skipping AWS check")
+		return ""
+	}
+
+	cmd := exec.Command(
+		"aws", "s3", "ls",
+		fmt.Sprintf("s3://%s", bucket),
+		"--no-sign-request",
+	)
+
+	out, err := cmd.CombinedOutput()
+	output := strings.ToLower(string(out))
+
+	// publicly listable
+	if err == nil {
+		return "PUBLIC"
+	}
+
+	// exists but private
+	if strings.Contains(output, "access denied") ||
+		strings.Contains(output, "all access disabled") {
+		return "PRIVATE"
+	}
+
+	return ""
+}
+
+// ==================== PERMUTATIONS ====================
 
 func generateWordlist(prefix string, words []string) []string {
 	unique := make(map[string]bool)
@@ -189,6 +232,13 @@ func scanBuckets(list []string, file *os.File) {
 	for _, word := range list {
 		b := NewS3(word)
 		code, perm := b.Check()
+
+		// AWS verification overrides HTTP result
+		awsPerm := awsPermissionCheck(b.Bucket)
+		if awsPerm != "" {
+			perm = awsPerm
+		}
+
 		if perm == "" {
 			continue
 		}
@@ -244,6 +294,12 @@ func searchGrayHat(keyword string, file *os.File) {
 
 		b := NewS3(bucket)
 		code, perm := b.Check()
+
+		awsPerm := awsPermissionCheck(bucket)
+		if awsPerm != "" {
+			perm = awsPerm
+		}
+
 		if perm == "" {
 			continue
 		}
@@ -254,7 +310,7 @@ func searchGrayHat(keyword string, file *os.File) {
 	}
 }
 
-// ==================== OSINT.SH ====================
+// ==================== OSINT ====================
 
 func searchOSINT(keyword string, file *os.File) {
 	vprint("[VERBOSE] Querying OSINT.sh…")
@@ -287,6 +343,12 @@ func searchOSINT(keyword string, file *os.File) {
 
 		b := NewS3(bucket)
 		code, perm := b.Check()
+
+		awsPerm := awsPermissionCheck(bucket)
+		if awsPerm != "" {
+			perm = awsPerm
+		}
+
 		if perm == "" {
 			continue
 		}
@@ -304,6 +366,7 @@ func main() {
 	wordlistFile := flag.String("w", "", "Wordlist file")
 	outputFile := flag.String("o", "", "Output file")
 	flag.BoolVar(&verbose, "v", false, "Verbose mode")
+	flag.BoolVar(&useAWS, "aws", false, "Verify permissions using AWS CLI")
 	flag.Parse()
 
 	banner()
@@ -314,7 +377,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// init wordlist globally
 	if err := initWordlist(*wordlistFile); err != nil {
 		fmt.Println("Error loading wordlist:", err)
 		return
@@ -323,7 +385,6 @@ func main() {
 	wordlist := generateWordlist(*target, globalWordlist)
 	vprint("[VERBOSE] Generated %d permutations", len(wordlist))
 
-	// output file
 	var file *os.File
 	var err error
 	if *outputFile != "" {
