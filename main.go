@@ -16,8 +16,8 @@ import (
 
 /*
    s3-checker
-   Valid-bucket aware + clean single output
-   Developed by Abu Raihan Biswas (zapstiko)
+   Only VALID bucket URLs are printed.
+   Clean, deduplicated, script-friendly output.
 */
 
 // ==================== EMBED ====================
@@ -48,7 +48,7 @@ func banner() {
    ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
   |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
 
-            s3-checker — S3 Bucket Discovery Tool
+            s3-checker — valid bucket mode
 `)
 }
 
@@ -103,24 +103,24 @@ func initWordlist(path string) error {
 
 type S3 struct {
 	Bucket string
-	Domain string
+	URL    string
 	Client *http.Client
 }
 
 func NewS3(bucket string) *S3 {
 	return &S3{
 		Bucket: bucket,
-		Domain: fmt.Sprintf("http://%s.s3.amazonaws.com", bucket),
+		URL:    fmt.Sprintf("http://%s.s3.amazonaws.com", bucket),
 		Client: &http.Client{Timeout: 6 * time.Second},
 	}
 }
 
-// -------- VALID BUCKET DETECTOR (NEW) --------
+// -------- VALID BUCKET DETECTOR --------
 
 func (s *S3) Exists() (bool, int) {
-	logCheck(s.Bucket, s.Domain)
+	logCheck(s.Bucket, s.URL)
 
-	resp, err := s.Client.Get(s.Domain)
+	resp, err := s.Client.Get(s.URL)
 	if err != nil {
 		return false, 0
 	}
@@ -128,24 +128,22 @@ func (s *S3) Exists() (bool, int) {
 
 	code := resp.StatusCode
 
-	// VALID bucket indicators
+	// Only these mean bucket exists
 	switch code {
 	case 200, 403:
 		return true, code
-	case 404:
-		return false, code
 	default:
 		return false, code
 	}
 }
 
-// ==================== FINAL PERMISSION CLASSIFIER ====================
+// ==================== PERMISSION CLASSIFIER ====================
 
 func classifyPermissions(bucket string) string {
 	httpPublic := false
 	awsPublic := false
 
-	// HTTP list check
+	// HTTP list probe
 	httpURL := fmt.Sprintf("http://%s.s3.amazonaws.com/?list-type=2", bucket)
 	resp, err := http.Get(httpURL)
 	if err == nil && resp.StatusCode == 200 {
@@ -155,7 +153,7 @@ func classifyPermissions(bucket string) string {
 		resp.Body.Close()
 	}
 
-	// AWS CLI check
+	// AWS CLI probe
 	if useAWS {
 		if _, err := exec.LookPath("aws"); err == nil {
 			cmd := exec.Command(
@@ -235,7 +233,7 @@ func scanBuckets(list []string, file *os.File) {
 
 		b := NewS3(word)
 
-		// ✅ NEW: strict existence check
+		// ✅ ONLY proceed if bucket truly exists
 		exists, code := b.Exists()
 		if !exists {
 			continue
@@ -243,8 +241,7 @@ func scanBuckets(list []string, file *os.File) {
 
 		finalPerm := classifyPermissions(b.Bucket)
 
-		url := fmt.Sprintf("http://%s.s3.amazonaws.com", b.Bucket)
-		line := fmt.Sprintf("%s | %d | %s", url, code, finalPerm)
+		line := fmt.Sprintf("%s | %d | %s", b.URL, code, finalPerm)
 		writeLine(file, line)
 	}
 }
@@ -293,6 +290,7 @@ func searchGrayHat(keyword string, file *os.File) {
 		seen[bucket] = true
 
 		b := NewS3(bucket)
+
 		exists, code := b.Exists()
 		if !exists {
 			continue
@@ -300,8 +298,7 @@ func searchGrayHat(keyword string, file *os.File) {
 
 		finalPerm := classifyPermissions(bucket)
 
-		url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
-		line := fmt.Sprintf("%s | %d | %s", url, code, finalPerm)
+		line := fmt.Sprintf("%s | %d | %s", b.URL, code, finalPerm)
 		writeLine(file, line)
 	}
 }
@@ -338,6 +335,7 @@ func searchOSINT(keyword string, file *os.File) {
 		seen[bucket] = true
 
 		b := NewS3(bucket)
+
 		exists, code := b.Exists()
 		if !exists {
 			continue
@@ -345,8 +343,7 @@ func searchOSINT(keyword string, file *os.File) {
 
 		finalPerm := classifyPermissions(bucket)
 
-		url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
-		line := fmt.Sprintf("%s | %d | %s", url, code, finalPerm)
+		line := fmt.Sprintf("%s | %d | %s", b.URL, code, finalPerm)
 		writeLine(file, line)
 	}
 }
