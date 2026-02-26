@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"flag"
 	"fmt"
 	"io"
@@ -16,7 +17,11 @@ import (
    s3-checker
    Professional AWS S3 Bucket Discovery & Permission Auditor
    Developed by Abu Raihan Biswas (zapstiko)
+   GitHub: https://github.com/zapstiko/s3-checker
 */
+
+//go:embed common_bucket_prefixes.txt
+var embeddedWordlist string
 
 var environments = []string{
 	"dev", "development", "stage", "s3",
@@ -35,8 +40,7 @@ func banner() {
   \___ \   |_ \____| |    | '_ \ / _ \/ __| |/ / _ \ '__|
    ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
   |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
-
-
+  
         Automated S3 Bucket Discovery & Permission Auditor
         GitHub: github.com/zapstiko/s3-checker
         Author : Abu Raihan Biswas (zapstiko)
@@ -50,6 +54,37 @@ func vprint(format string, a ...any) {
 	if verbose {
 		fmt.Printf(format+"\n", a...)
 	}
+}
+
+// --------------------
+// Load wordlist (embedded fallback)
+// --------------------
+func loadWordlist(path string) ([]string, error) {
+	var content string
+
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			content = string(data)
+			vprint("[VERBOSE] Loaded external wordlist: %s", path)
+		}
+	}
+
+	if content == "" {
+		content = embeddedWordlist
+		vprint("[VERBOSE] Using embedded wordlist")
+	}
+
+	var words []string
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			words = append(words, line)
+		}
+	}
+
+	return words, nil
 }
 
 // --------------------
@@ -127,29 +162,6 @@ func generateWordlist(prefix string, words []string) []string {
 }
 
 // --------------------
-// Read wordlist
-// --------------------
-func readWordlist(file string) ([]string, error) {
-	vprint("[VERBOSE] Loading wordlist: %s", file)
-
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var words []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			words = append(words, line)
-		}
-	}
-	return words, nil
-}
-
-// --------------------
 // Output helper
 // --------------------
 func writeLine(file *os.File, line string) {
@@ -163,7 +175,7 @@ func writeLine(file *os.File, line string) {
 // Local scan
 // --------------------
 func scanBuckets(list []string, file *os.File) {
-	vprint("[VERBOSE] Starting local permutation scan (%d candidates)", len(list))
+	vprint("[VERBOSE] Starting local scan (%d candidates)", len(list))
 
 	for _, word := range list {
 		b := NewS3(word)
@@ -291,10 +303,6 @@ func main() {
 
 	banner()
 
-	if *wordlistFile == "" {
-		*wordlistFile = "common_bucket_prefixes.txt"
-	}
-
 	if *target == "" {
 		fmt.Println("Usage: s3-checker -t <target>")
 		flag.PrintDefaults()
@@ -312,9 +320,9 @@ func main() {
 		defer file.Close()
 	}
 
-	words, err := readWordlist(*wordlistFile)
+	words, err := loadWordlist(*wordlistFile)
 	if err != nil {
-		fmt.Println("Error reading wordlist:", err)
+		fmt.Println("Error loading wordlist:", err)
 		return
 	}
 
