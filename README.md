@@ -4,7 +4,6 @@ Fast, focused AWS S3 bucket discovery and permission auditing tool written in Go
 
 S3 Checker generates high-probability bucket name permutations for a target, validates their existence, and classifies exposure level. It also enriches results using public bucket intelligence sources.
 
----
 
 ## Overview
 
@@ -17,7 +16,6 @@ S3 buckets are frequently exposed due to predictable naming patterns. **s3-check
 
 Designed for bug bounty hunters, cloud security engineers, and red team operators.
 
----
 
 ## Features
 
@@ -32,8 +30,6 @@ Designed for bug bounty hunters, cloud security engineers, and red team operator
 - Lightweight and fast  
 - `go install` ready  
 
----
-
 ## Installation
 
 ### Using Go (recommended)
@@ -45,8 +41,6 @@ Ensure your Go binary path is available:
 
 export PATH=$PATH:$(go env GOPATH)/bin
 
-
-⸻
 ```
 ## Build from source
 ```
