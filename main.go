@@ -38,10 +38,10 @@ func vprint(format string, a ...any) {
 	}
 }
 
-// lightweight progress (non-verbose mode)
+// lightweight progress (only in non-verbose mode)
 func progress(bucket string) {
 	if !verbose {
-		fmt.Printf("[+] Checking: %s\r", bucket)
+		fmt.Printf("[+] Checking: %-40s\r", bucket)
 	}
 }
 
@@ -113,7 +113,7 @@ func (s *S3) Exists() (bool, int) {
 
 	code := resp.StatusCode
 
-	// elite detection
+	// treat these as valid buckets
 	if code == 200 || code == 403 || code == 301 {
 		return true, code
 	}
@@ -254,8 +254,7 @@ func generateWordlist(prefix string, words []string) []string {
 // ================= OUTPUT =================
 
 func writeLine(file *os.File, line string) {
-	// clear progress line and print clean result
-	fmt.Printf("\r%s\n", line)
+	fmt.Printf("\r%s\n", line) // clear progress line
 	if file != nil {
 		file.WriteString(line + "\n")
 	}
@@ -284,7 +283,7 @@ func scanBuckets(list []string, file *os.File) {
 		s3 := NewS3(word)
 		exists, code := s3.Exists()
 
-		// always show result
+		// always output something
 		if !exists {
 			line := fmt.Sprintf(
 				"INFO %-10s | %s | status:%d",
