@@ -12,9 +12,43 @@ import (
 	"time"
 )
 
+/*
+            s3-checker — S3 Bucket Discovery Tool
+            github.com/zapstiko/s3-checker
+            Abu Raihan Biswas (zapstiko)
+*/
+
 var environments = []string{
 	"dev", "development", "stage", "s3",
 	"staging", "prod", "production", "test",
+}
+
+var verbose bool
+
+// --------------------
+// Banner
+// --------------------
+func banner() {
+	fmt.Println(`
+   ____   _____      _____ _               _
+  / ___| |___ /     / ____| |__   ___  ___| | _____ _ __
+  \___ \   |_ \____| |    | '_ \ / _ \/ __| |/ / _ \ '__|
+   ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
+  |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
+
+            s3-checker — S3 Bucket Discovery Tool
+            github.com/zapstiko/s3-checker
+            Abu Raihan Biswas (zapstiko)
+`)
+}
+
+// --------------------
+// Verbose logger
+// --------------------
+func vprint(format string, a ...any) {
+	if verbose {
+		fmt.Printf(format+"\n", a...)
+	}
 }
 
 // --------------------
@@ -35,21 +69,22 @@ func NewS3(bucket string) *S3 {
 }
 
 func (s *S3) Check() (int, string) {
+	vprint("[VERBOSE] Checking %s", s.Domain)
+
 	resp, err := s.Client.Get(s.Domain)
 	if err != nil {
+		vprint("[VERBOSE] Error: %v", err)
 		return 0, ""
 	}
 	defer resp.Body.Close()
 
-	code := resp.StatusCode
-
-	switch code {
+	switch resp.StatusCode {
 	case 200:
-		return code, "PUBLIC"
+		return resp.StatusCode, "PUBLIC"
 	case 403:
-		return code, "PRIVATE"
+		return resp.StatusCode, "PRIVATE"
 	default:
-		return code, ""
+		return resp.StatusCode, ""
 	}
 }
 
@@ -94,6 +129,8 @@ func generateWordlist(prefix string, words []string) []string {
 // Read wordlist
 // --------------------
 func readWordlist(file string) ([]string, error) {
+	vprint("[VERBOSE] Loading wordlist: %s", file)
+
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, err
@@ -122,25 +159,14 @@ func writeLine(file *os.File, line string) {
 }
 
 // --------------------
-// Local scanner
+// Local scan
 // --------------------
-func scanBuckets(list []string, output string) {
-	var file *os.File
-	var err error
-
-	if output != "" {
-		file, err = os.Create(output)
-		if err != nil {
-			fmt.Println("Error creating output file:", err)
-			return
-		}
-		defer file.Close()
-	}
+func scanBuckets(list []string, file *os.File) {
+	vprint("[VERBOSE] Starting local permutation scan (%d candidates)", len(list))
 
 	for _, word := range list {
 		b := NewS3(word)
 		code, perm := b.Check()
-
 		if perm == "" {
 			continue
 		}
@@ -154,11 +180,14 @@ func scanBuckets(list []string, output string) {
 // --------------------
 // GrayHat search
 // --------------------
-func searchGrayHat(keyword string) {
+func searchGrayHat(keyword string, file *os.File) {
 	apiKey := os.Getenv("GHW_API_KEY")
 	if apiKey == "" {
+		vprint("[VERBOSE] GrayHat skipped (no API key)")
 		return
 	}
+
+	vprint("[VERBOSE] Querying GrayHatWarfare…")
 
 	url := fmt.Sprintf(
 		"https://buckets.grayhatwarfare.com/api/v1/buckets?keywords=%s",
@@ -200,14 +229,17 @@ func searchGrayHat(keyword string) {
 		}
 
 		url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
-		fmt.Printf("%s | %d | %s\n", url, code, perm)
+		line := fmt.Sprintf("%s | %d | %s", url, code, perm)
+		writeLine(file, line)
 	}
 }
 
 // --------------------
-// OSINT.SH search
+// OSINT search
 // --------------------
-func searchOSINT(keyword string) {
+func searchOSINT(keyword string, file *os.File) {
+	vprint("[VERBOSE] Querying OSINT.sh…")
+
 	url := fmt.Sprintf("https://osint.sh/buckets/?q=%s", keyword)
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -241,7 +273,8 @@ func searchOSINT(keyword string) {
 		}
 
 		url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
-		fmt.Printf("%s | %d | %s\n", url, code, perm)
+		line := fmt.Sprintf("%s | %d | %s", url, code, perm)
+		writeLine(file, line)
 	}
 }
 
@@ -252,16 +285,30 @@ func main() {
 	target := flag.String("t", "", "Target name (required)")
 	wordlistFile := flag.String("w", "", "Wordlist file")
 	outputFile := flag.String("o", "", "Output file")
+	flag.BoolVar(&verbose, "v", false, "Verbose mode")
 	flag.Parse()
+
+	banner()
 
 	if *wordlistFile == "" {
 		*wordlistFile = "common_bucket_prefixes.txt"
 	}
 
 	if *target == "" {
-		fmt.Println("Usage: s3-finder -t <target>")
+		fmt.Println("Usage: s3-checker -t <target>")
 		flag.PrintDefaults()
 		os.Exit(1)
+	}
+
+	var file *os.File
+	var err error
+	if *outputFile != "" {
+		file, err = os.Create(*outputFile)
+		if err != nil {
+			fmt.Println("Error creating output file:", err)
+			return
+		}
+		defer file.Close()
 	}
 
 	words, err := readWordlist(*wordlistFile)
@@ -272,7 +319,7 @@ func main() {
 
 	wordlist := generateWordlist(*target, words)
 
-	scanBuckets(wordlist, *outputFile)
-	searchGrayHat(*target)
-	searchOSINT(*target)
+	scanBuckets(wordlist, file)
+	searchGrayHat(*target, file)
+	searchOSINT(*target, file)
 }
