@@ -1,59 +1,83 @@
-:::writing{variant=“standard” id=“91746”}
+# S3 Checker
 
-S3 Checker 🔍
+Fast, focused AWS S3 bucket discovery and permission auditing tool written in Go.
 
-A fast Go-based tool to bruteforce and discover AWS S3 buckets using smart permutations and OSINT sources. Built for bug bounty hunters and security researchers.
+S3 Checker generates high-probability bucket name permutations for a target, validates their existence, and classifies exposure level. It also enriches results using public bucket intelligence sources.
 
-⸻
+---
 
-🧩 Description
+## Overview
 
-s3-checker generates common bucket name permutations for a target and verifies their existence and permissions. It also enriches results using public bucket indexes.
+S3 buckets are frequently exposed due to predictable naming patterns. **s3-checker** automates:
 
-Originally inspired by earlier S3 discovery techniques.
+- Intelligent permutation generation  
+- Bucket existence validation  
+- Permission classification  
+- OSINT enrichment  
 
-⸻
+Designed for bug bounty hunters, cloud security engineers, and red team operators.
 
-✨ Features
-	•	Smart S3 permutation engine
-	•	Permission detection (PUBLIC / PRIVATE)
-	•	Full URL output
-	•	GrayHatWarfare integration
-	•	OSINT.sh integration
-	•	Custom wordlist support
-	•	Output file support
-	•	Clean, grep-friendly output
-	•	Go install ready
+---
 
-⸻
+## Features
 
-📦 Install
+- High-signal permutation engine  
+- Permission detection (PUBLIC / PRIVATE)  
+- Full virtual-host style URLs  
+- GrayHatWarfare integration  
+- OSINT.sh enrichment  
+- Custom wordlist support  
+- File output support  
+- Grep-friendly output  
+- Lightweight and fast  
+- `go install` ready  
 
+---
+
+## Installation
+
+### Using Go (recommended)
+
+```bash
 go install github.com/zapstiko/s3-checker@latest
 
-Ensure your $GOPATH/bin is in your PATH.
+Ensure your Go binary path is available:
+
+export PATH=$PATH:$(go env GOPATH)/bin
+
 
 ⸻
 
-🚀 Usage
+Build from source
+
+git clone https://github.com/zapstiko/s3-checker.git
+cd s3-checker
+go build -o s3-checker
+
+
+⸻
+
+Usage
+
+Basic scan
 
 s3-checker -t <COMPANY>
 
 Examples
 
-Basic scan:
+Scan a target:
 
 s3-checker -t example
 
-Save output:
+Save results:
 
 s3-checker -t example -o buckets.txt
 
-Custom wordlist:
+Use custom wordlist:
 
 s3-checker -t example -w custom.txt
 
-With GrayHatWarfare API:
+Enable GrayHatWarfare enrichment:
 
 export GHW_API_KEY=your_api_key
 s3-checker -t example
@@ -61,15 +85,21 @@ s3-checker -t example
 
 ⸻
 
-📤 Output Format
+Output Format
 
 http://bucket.s3.amazonaws.com | 200 | PUBLIC
 http://bucket.s3.amazonaws.com | 403 | PRIVATE
 
+Status Meaning
+
+Status	Meaning
+200	Publicly accessible bucket
+403	Bucket exists but is private
+
 
 ⸻
 
-📁 Project Structure
+Project Structure
 
 s3-checker/
 ├── main.go
@@ -80,22 +110,32 @@ s3-checker/
 
 ⸻
 
-🙏 Special Thanks
-	•	http://twitter.com/nahamsec
-	•	http://twitter.com/JobertAbma
+Security & Ethics
 
-⸻
-
-⚠️ Disclaimer
-
-This tool is intended only for authorized security testing and educational purposes.
-Do not use against systems without proper permission.
+This tool is intended strictly for authorized security testing and educational use.
+	•	Always obtain proper permission
+	•	Follow responsible disclosure
+	•	Respect applicable laws and policies
 
 The author assumes no liability for misuse.
 
 ⸻
 
-⭐ Support
+Acknowledgements
 
-If this tool helped you, consider giving the repo a star.
-:::
+Special thanks to the security community:
+	•	http://twitter.com/nahamsec
+	•	http://twitter.com/JobertAbma
+
+⸻
+
+Contributing
+
+Pull requests and improvements are welcome. For major changes, please open an issue first to discuss what you would like to modify.
+
+⸻
+
+License
+
+MIT License
+
