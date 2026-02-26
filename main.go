@@ -16,6 +16,8 @@ import (
 //go:embed common_bucket_prefixes.txt
 var embeddedWordlist string
 
+const version = "v1.2.0"
+
 // ================= COLORS =================
 
 const (
@@ -42,11 +44,49 @@ func colorStatus(code int) string {
 // ================= GLOBALS =================
 
 var (
-	client      = &http.Client{Timeout: 6 * time.Second}
-	totalChecks uint64
+	client        = &http.Client{Timeout: 6 * time.Second}
+	totalChecks   uint64
+	statusInclude int
+	statusExclude int
 )
 
-// ================= S3 =================
+// ================= BANNER =================
+
+func printBanner(target string, total int, concurrency int, rate int) {
+	banner := `
+   ____   _____      _____ _               _
+  / ___| |___ /     / ____| |__   ___  ___| | _____ _ __
+  \___ \   |_ \____| |    | '_ \ / _ \/ __| |/ / _ \ '__|
+   ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
+  |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
+
+            s3-checker — S3 Bucket Discovery Tool
+                 s3-checker ` + version + `
+			   Developer - Abu Raihan Biswas 
+				    Username - zapstiko
+`
+	fmt.Println(banner)
+	fmt.Printf("[+] Target       : %s\n", target)
+	fmt.Printf("[+] Candidates   : %d\n", total)
+	fmt.Printf("[+] Concurrency  : %d\n", concurrency)
+
+	if rate > 0 {
+		fmt.Printf("[+] Rate limit   : %d req/sec\n", rate)
+	} else {
+		fmt.Printf("[+] Rate limit   : disabled\n")
+	}
+
+	if statusInclude != 0 {
+		fmt.Printf("[+] Include code : %d\n", statusInclude)
+	}
+	if statusExclude != 0 {
+		fmt.Printf("[+] Exclude code : %d\n", statusExclude)
+	}
+
+	fmt.Println()
+}
+
+// ================= S3 CHECK =================
 
 func checkBucket(bucket string) (bool, int, string) {
 	url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
@@ -147,25 +187,36 @@ func worker(jobs <-chan string, wg *sync.WaitGroup, outFile *os.File, rate <-cha
 		exists, code, url := checkBucket(bucket)
 		atomic.AddUint64(&totalChecks, 1)
 
-		// progress line
 		fmt.Printf("\r[+] Checked: %d", atomic.LoadUint64(&totalChecks))
 
-		if exists {
-			color := colorStatus(code)
+		if !exists {
+			continue
+		}
 
-			line := fmt.Sprintf(
-				"%s [%s%d%s] [S3 Bucket Found]",
-				url,
-				color,
-				code,
-				Reset,
-			)
+		// include filter
+		if statusInclude != 0 && code != statusInclude {
+			continue
+		}
 
-			fmt.Printf("\r%s\n", line)
+		// exclude filter
+		if statusExclude != 0 && code == statusExclude {
+			continue
+		}
 
-			if outFile != nil {
-				outFile.WriteString(line + "\n")
-			}
+		color := colorStatus(code)
+
+		line := fmt.Sprintf(
+			"%s [%s%d%s] [S3 Bucket Found]",
+			url,
+			color,
+			code,
+			Reset,
+		)
+
+		fmt.Printf("\r%s\n", line)
+
+		if outFile != nil {
+			outFile.WriteString(line + "\n")
 		}
 	}
 }
@@ -177,11 +228,13 @@ func main() {
 	wordlistPath := flag.String("w", "", "Custom wordlist")
 	outputPath := flag.String("o", "", "Output file")
 	concurrency := flag.Int("c", 50, "Concurrency")
-	rateLimit := flag.Int("rate", 0, "Requests per second (optional)")
+	rateLimit := flag.Int("r", 0, "Rate limit (req/sec)")
+	flag.IntVar(&statusInclude, "s", 0, "Include only this status code")
+	flag.IntVar(&statusExclude, "e", 0, "Exclude this status code")
 	flag.Parse()
 
 	if *target == "" {
-		fmt.Println("Usage: s3-checker -t <target> [-w wordlist] [-o output]")
+		fmt.Println("Usage: s3-checker -t <target>")
 		os.Exit(1)
 	}
 
@@ -201,8 +254,7 @@ func main() {
 
 	wordlist := generateWordlist(*target, words)
 
-	fmt.Printf("Generated %d bucket permutations\n", len(wordlist))
-	fmt.Printf("Concurrency: %d\n\n", *concurrency)
+	printBanner(*target, len(wordlist), *concurrency, *rateLimit)
 
 	// output file
 	var outFile *os.File
@@ -224,13 +276,11 @@ func main() {
 	jobs := make(chan string, *concurrency)
 	var wg sync.WaitGroup
 
-	// start workers
 	for i := 0; i < *concurrency; i++ {
 		wg.Add(1)
 		go worker(jobs, &wg, outFile, rate)
 	}
 
-	// feed jobs
 	for _, bucket := range wordlist {
 		jobs <- bucket
 	}
