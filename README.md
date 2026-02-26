@@ -47,8 +47,8 @@ export PATH=$PATH:$(go env GOPATH)/bin
 
 
 ⸻
-
-Build from source
+```
+## Build from source
 
 git clone https://github.com/zapstiko/s3-checker.git
 cd s3-checker
@@ -57,10 +57,10 @@ go build -o s3-checker
 
 ⸻
 
-Usage
+## Usage
 
-Basic scan
-
+### Basic scan
+```
 s3-checker -t <COMPANY>
 
 Examples
@@ -68,72 +68,68 @@ Examples
 Scan a target:
 
 s3-checker -t example
-
-Save results:
-
+```
+### Save results:
+```
 s3-checker -t example -o buckets.txt
-
-Use custom wordlist:
-
+```
+### Use custom wordlist:
+```
 s3-checker -t example -w custom.txt
 
-Enable GrayHatWarfare enrichment:
+```
 
+### Enable GrayHatWarfare enrichment:
+```
 export GHW_API_KEY=your_api_key
 s3-checker -t example
+```
 
-
-⸻
-
-Output Format
-
+### Output Format
+```
 http://bucket.s3.amazonaws.com | 200 | PUBLIC
 http://bucket.s3.amazonaws.com | 403 | PRIVATE
-
-Status Meaning
-
+```
+### Status Meaning
+```
 Status	Meaning
 200	Publicly accessible bucket
 403	Bucket exists but is private
+```
 
-
-⸻
-
-Project Structure
-
+### Project Structure
+```
 s3-checker/
 ├── main.go
 ├── go.mod
 ├── common_bucket_prefixes.txt
 └── README.md
+````
 
-
-⸻
-
-Security & Ethics
-
+### Security & Ethics
+```
 This tool is intended strictly for authorized security testing and educational use.
 	•	Always obtain proper permission
 	•	Follow responsible disclosure
 	•	Respect applicable laws and policies
 
 The author assumes no liability for misuse.
+````
 
-⸻
 
-Acknowledgements
-
+### Acknowledgements
+```
 Special thanks to the security community:
 	•	http://twitter.com/nahamsec
 	•	http://twitter.com/JobertAbma
 
-⸻
+```
 
-Contributing
-
+### Contributing
+```
 Pull requests and improvements are welcome. For major changes, please open an issue first to discuss what you would like to modify.
 
-⸻
+```
 
 License
 
