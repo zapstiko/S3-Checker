@@ -13,9 +13,9 @@ import (
 )
 
 /*
-            s3-checker — S3 Bucket Discovery Tool
-            github.com/zapstiko/s3-checker
-            Abu Raihan Biswas (zapstiko)
+   s3-checker
+   Professional AWS S3 Bucket Discovery & Permission Auditor
+   Developed by Abu Raihan Biswas (zapstiko)
 */
 
 var environments = []string{
@@ -36,9 +36,10 @@ func banner() {
    ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
   |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
 
-            s3-checker — S3 Bucket Discovery Tool
-            github.com/zapstiko/s3-checker
-            Abu Raihan Biswas (zapstiko)
+
+        Automated S3 Bucket Discovery & Permission Auditor
+        GitHub: github.com/zapstiko/s3-checker
+        Author : Abu Raihan Biswas (zapstiko)
 `)
 }
 
