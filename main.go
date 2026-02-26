@@ -30,6 +30,21 @@ var environments = []string{
 	"staging", "prod", "production", "test",
 }
 
+// ================= VERBOSE =================
+
+func vprint(format string, a ...any) {
+	if verbose {
+		fmt.Printf(format+"\n", a...)
+	}
+}
+
+// lightweight progress (non-verbose mode)
+func progress(bucket string) {
+	if !verbose {
+		fmt.Printf("[+] Checking: %s\r", bucket)
+	}
+}
+
 // ================= XML STRUCT =================
 
 type ListBucketResult struct {
@@ -46,11 +61,13 @@ func initWordlist(path string) error {
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			content = string(data)
+			vprint("[VERBOSE] Using custom wordlist: %s", path)
 		}
 	}
 
 	if content == "" {
 		content = embeddedWordlist
+		vprint("[VERBOSE] Using embedded wordlist")
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(content))
@@ -61,13 +78,15 @@ func initWordlist(path string) error {
 		}
 	}
 
+	vprint("[VERBOSE] Loaded wordlist (%d entries)", len(globalWordlist))
+
 	if len(globalWordlist) == 0 {
 		return fmt.Errorf("wordlist empty")
 	}
 	return nil
 }
 
-// ================= S3 STRUCT =================
+// ================= S3 =================
 
 type S3 struct {
 	Bucket string
@@ -83,7 +102,7 @@ func NewS3(bucket string) *S3 {
 	}
 }
 
-// ================= EXISTENCE (HARDENED) =================
+// ================= EXISTENCE =================
 
 func (s *S3) Exists() (bool, int) {
 	resp, err := s.Client.Get(s.URL)
@@ -94,7 +113,7 @@ func (s *S3) Exists() (bool, int) {
 
 	code := resp.StatusCode
 
-	// ✅ Elite detection (important fix)
+	// elite detection
 	if code == 200 || code == 403 || code == 301 {
 		return true, code
 	}
@@ -235,15 +254,18 @@ func generateWordlist(prefix string, words []string) []string {
 // ================= OUTPUT =================
 
 func writeLine(file *os.File, line string) {
-	fmt.Println(line)
+	// clear progress line and print clean result
+	fmt.Printf("\r%s\n", line)
 	if file != nil {
 		file.WriteString(line + "\n")
 	}
 }
 
-// ================= ELITE SCAN =================
+// ================= SCAN =================
 
 func scanBuckets(list []string, file *os.File) {
+	vprint("[VERBOSE] Starting local scan (%d candidates)", len(list))
+
 	if len(list) == 0 {
 		fmt.Println("[WARN] zero candidates generated")
 		return
@@ -257,11 +279,12 @@ func scanBuckets(list []string, file *os.File) {
 		}
 		seen[word] = true
 
-		s3 := NewS3(word)
+		progress(word)
 
+		s3 := NewS3(word)
 		exists, code := s3.Exists()
 
-		// ✅ ALWAYS PRINT
+		// always show result
 		if !exists {
 			line := fmt.Sprintf(
 				"INFO %-10s | %s | status:%d",
@@ -271,4 +294,71 @@ func scanBuckets(list []string, file *os.File) {
 			)
 			writeLine(file, line)
 			continue
-		
+		}
+
+		region := s3.GetRegion()
+		authUsers, allUsers := checkACL(word)
+		count, size := getBucketStats(word)
+
+		if count == 0 {
+			line := fmt.Sprintf(
+				"INFO %-10s | %s | %-10s | PRIVATE",
+				"exists",
+				s3.URL,
+				region,
+			)
+			writeLine(file, line)
+			continue
+		}
+
+		line := fmt.Sprintf(
+			"INFO %-10s | %s | %-10s | AuthUsers:%s | AllUsers:%s | %d objects (%s)",
+			"exists",
+			s3.URL,
+			region,
+			authUsers,
+			allUsers,
+			count,
+			humanSize(size),
+		)
+
+		writeLine(file, line)
+	}
+}
+
+// ================= MAIN =================
+
+func main() {
+	target := flag.String("t", "", "Target (required)")
+	wordlistFile := flag.String("w", "", "Wordlist")
+	outputFile := flag.String("o", "", "Output file")
+	flag.BoolVar(&verbose, "v", false, "Verbose mode")
+	flag.BoolVar(&useAWS, "aws", false, "Use AWS CLI ACL check")
+	flag.Parse()
+
+	if *target == "" {
+		fmt.Println("Usage: s3-checker -t <target>")
+		os.Exit(1)
+	}
+
+	if err := initWordlist(*wordlistFile); err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	wordlist := generateWordlist(*target, globalWordlist)
+	vprint("[VERBOSE] Generated %d permutations", len(wordlist))
+
+	var file *os.File
+	var err error
+	if *outputFile != "" {
+		file, err = os.Create(*outputFile)
+		if err != nil {
+			fmt.Println("Output error:", err)
+			return
+		}
+		defer file.Close()
+	}
+
+	scanBuckets(wordlist, file)
+}
