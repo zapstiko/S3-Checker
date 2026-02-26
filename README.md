@@ -60,7 +60,7 @@ Examples
 
 Scan a target:
 
-s3-checker -t example
+s3-checker -t google
 ```
 ### Save results:
 ```
