@@ -16,7 +16,8 @@ import (
 
 /*
    s3-checker
-   Clean single-line output version
+   Professional S3 bucket validator + permission checker
+   Clean single-line output
    Developed by Abu Raihan Biswas (zapstiko)
 */
 
@@ -99,42 +100,35 @@ func initWordlist(path string) error {
 	return nil
 }
 
-// ==================== S3 CHECKER ====================
+// ==================== VALID BUCKET CHECK ====================
 
-type S3 struct {
-	Bucket string
-	Domain string
-	Client *http.Client
-}
+func isValidBucket(bucket string) (int, bool) {
+	url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
 
-func NewS3(bucket string) *S3 {
-	return &S3{
-		Bucket: bucket,
-		Domain: fmt.Sprintf("http://%s.s3.amazonaws.com", bucket),
-		Client: &http.Client{Timeout: 5 * time.Second},
-	}
-}
-
-func (s *S3) Check() (int, string) {
-	logCheck(s.Bucket, s.Domain)
-
-	resp, err := s.Client.Get(s.Domain)
+	client := &http.Client{Timeout: 6 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
-		return 0, ""
+		return 0, false
 	}
 	defer resp.Body.Close()
 
+	bodyBytes := make([]byte, 512)
+	n, _ := resp.Body.Read(bodyBytes)
+	body := strings.ToLower(string(bodyBytes[:n]))
+
+	if strings.Contains(body, "nosuchbucket") {
+		return resp.StatusCode, false
+	}
+
 	switch resp.StatusCode {
-	case 200:
-		return resp.StatusCode, "PUBLIC"
-	case 403:
-		return resp.StatusCode, "PRIVATE"
+	case 200, 301, 403:
+		return resp.StatusCode, true
 	default:
-		return resp.StatusCode, ""
+		return resp.StatusCode, false
 	}
 }
 
-// ==================== FINAL PERMISSION CLASSIFIER ====================
+// ==================== PERMISSION CLASSIFIER ====================
 
 func classifyPermissions(bucket string) string {
 	httpPublic := false
@@ -228,15 +222,16 @@ func scanBuckets(list []string, file *os.File) {
 		}
 		seen[word] = true
 
-		b := NewS3(word)
-		code, perm := b.Check()
-		if perm == "" {
+		code, valid := isValidBucket(word)
+		if !valid {
 			continue
 		}
 
-		finalPerm := classifyPermissions(b.Bucket)
+		logCheck(word, fmt.Sprintf("http://%s.s3.amazonaws.com", word))
 
-		url := fmt.Sprintf("http://%s.s3.amazonaws.com", b.Bucket)
+		finalPerm := classifyPermissions(word)
+
+		url := fmt.Sprintf("http://%s.s3.amazonaws.com", word)
 		line := fmt.Sprintf("%s | %d | %s", url, code, finalPerm)
 		writeLine(file, line)
 	}
@@ -285,9 +280,8 @@ func searchGrayHat(keyword string, file *os.File) {
 		}
 		seen[bucket] = true
 
-		b := NewS3(bucket)
-		code, perm := b.Check()
-		if perm == "" {
+		code, valid := isValidBucket(bucket)
+		if !valid {
 			continue
 		}
 
@@ -330,9 +324,8 @@ func searchOSINT(keyword string, file *os.File) {
 		}
 		seen[bucket] = true
 
-		b := NewS3(bucket)
-		code, perm := b.Check()
-		if perm == "" {
+		code, valid := isValidBucket(bucket)
+		if !valid {
 			continue
 		}
 
