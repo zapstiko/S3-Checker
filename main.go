@@ -30,7 +30,7 @@ var environments = []string{
 	"staging", "prod", "production", "test",
 }
 
-// ================= XML =================
+// ================= XML STRUCT =================
 
 type ListBucketResult struct {
 	Contents []struct {
@@ -67,7 +67,7 @@ func initWordlist(path string) error {
 	return nil
 }
 
-// ================= S3 =================
+// ================= S3 STRUCT =================
 
 type S3 struct {
 	Bucket string
@@ -117,10 +117,9 @@ func (s *S3) GetRegion() string {
 	return r
 }
 
-// ================= PUBLIC CHECK =================
+// ================= ACL CHECK =================
 
 func checkACL(bucket string) (authUsers, allUsers string) {
-	// default
 	authUsers = "[]"
 	allUsers = "[]"
 
@@ -156,7 +155,7 @@ func checkACL(bucket string) (authUsers, allUsers string) {
 	return
 }
 
-// ================= OBJECT STATS =================
+// ================= BUCKET STATS =================
 
 func getBucketStats(bucket string) (int, int64) {
 	url := fmt.Sprintf("http://%s.s3.amazonaws.com/?list-type=2", bucket)
@@ -185,11 +184,11 @@ func getBucketStats(bucket string) (int, int64) {
 	return len(result.Contents), total
 }
 
-// ================= SIZE =================
+// ================= SIZE FORMAT =================
 
 func humanSize(bytes int64) string {
-	if bytes < 1024 {
-		return fmt.Sprintf("%d B", bytes)
+	if bytes <= 0 {
+		return "0 B"
 	}
 	kb := float64(bytes) / 1024
 	if kb < 1024 {
@@ -231,7 +230,16 @@ func generateWordlist(prefix string, words []string) []string {
 	return result
 }
 
-// ================= SCAN =================
+// ================= OUTPUT =================
+
+func writeLine(file *os.File, line string) {
+	fmt.Println(line)
+	if file != nil {
+		file.WriteString(line + "\n")
+	}
+}
+
+// ================= ELITE SCAN =================
 
 func scanBuckets(list []string, file *os.File) {
 	seen := make(map[string]bool)
@@ -244,13 +252,15 @@ func scanBuckets(list []string, file *os.File) {
 
 		s3 := NewS3(word)
 
-		exists, _ := s3.Exists()
+		exists, code := s3.Exists()
 
+		// ✅ ALWAYS PRINT (professional behavior)
 		if !exists {
 			line := fmt.Sprintf(
-				"INFO %-10s | %s",
+				"INFO %-10s | %s | status:%d",
 				"not_exist",
 				s3.URL,
+				code,
 			)
 			writeLine(file, line)
 			continue
@@ -260,8 +270,21 @@ func scanBuckets(list []string, file *os.File) {
 		authUsers, allUsers := checkACL(word)
 		count, size := getBucketStats(word)
 
+		// Private bucket handling
+		if count == 0 {
+			line := fmt.Sprintf(
+				"INFO %-10s | %s | %-10s | PRIVATE",
+				"exists",
+				s3.URL,
+				region,
+			)
+			writeLine(file, line)
+			continue
+		}
+
+		// Public bucket full info
 		line := fmt.Sprintf(
-			"INFO %-10s | %s | %-10s | AuthUsers: %s | AllUsers: %s | %d objects (%s)",
+			"INFO %-10s | %s | %-10s | AuthUsers:%s | AllUsers:%s | %d objects (%s)",
 			"exists",
 			s3.URL,
 			region,
@@ -272,15 +295,6 @@ func scanBuckets(list []string, file *os.File) {
 		)
 
 		writeLine(file, line)
-	}
-}
-
-// ================= OUTPUT =================
-
-func writeLine(file *os.File, line string) {
-	fmt.Println(line)
-	if file != nil {
-		file.WriteString(line + "\n")
 	}
 }
 
