@@ -98,8 +98,7 @@ func isExcluded(code int) bool {
 // ================= BANNER =================
 
 func printBanner(target string, total int, concurrency int, rate int) {
-	banner := `
-    ____   _____      _____ _               _
+	banner := `    ____   _____      _____ _               _
   / ___| |___ /     / ____| |__   ___  ___| | _____ _ __
   \___ \   |_ \____| |    | '_ \ / _ \/ __| |/ / _ \ '__|
    ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
@@ -108,8 +107,8 @@ func printBanner(target string, total int, concurrency int, rate int) {
             s3-checker — S3 Bucket Discovery Tool
 		Developer - Abu Raihan Biswas
 		Username - zapstiko
-	s3-checker ` + version + `
-`
+` + "                 s3-checker " + version + "\n"
+
 	fmt.Println(banner)
 	fmt.Printf("[+] Target       : %s\n", target)
 	fmt.Printf("[+] Candidates   : %d\n", total)
