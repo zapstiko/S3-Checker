@@ -107,8 +107,8 @@ func printBanner(target string, total int, concurrency int, rate int) {
 
             s3-checker — S3 Bucket Discovery Tool
                  s3-checker ` + version + `
-			   Developer - Abu Raihan Biswas 
-				    Username - zapstiko
+				 Developer - Abu Raihan Biswas
+				 Username - zapstiko
 `
 	fmt.Println(banner)
 	fmt.Printf("[+] Target       : %s\n", target)
