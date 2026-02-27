@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -167,14 +168,12 @@ type ghwResponse struct {
 func fetchFromGrayHatWarfare(target string) []string {
 	apiKey := os.Getenv("GHW_API_KEY")
 	if apiKey == "" {
-		// No API key, silently skip
-		return []string{}
+		return []string{} // silently skip
 	}
 
 	url := fmt.Sprintf("https://buckets.grayhatwarfare.com/api/v1/buckets?access_token=%s&keywords=%s", apiKey, target)
 	resp, err := http.Get(url)
 	if err != nil {
-		// Optionally log error, but we'll just return empty
 		return []string{}
 	}
 	defer resp.Body.Close()
@@ -206,7 +205,7 @@ func fetchFromOsintSh(target string) []string {
 	// Prepare form data
 	formData := url.Values{
 		"keyword":   {target},
-		"extension": {""}, // optional, leave empty
+		"extension": {""},
 	}
 
 	// Create request
@@ -217,7 +216,7 @@ func fetchFromOsintSh(target string) []string {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "s3-checker/"+version)
 
-	// Send request with a timeout (use a separate client to avoid interfering with the global one)
+	// Use a separate client with a timeout
 	scrapeClient := &http.Client{Timeout: 10 * time.Second}
 	resp, err := scrapeClient.Do(req)
 	if err != nil {
@@ -229,27 +228,18 @@ func fetchFromOsintSh(target string) []string {
 		return []string{}
 	}
 
-	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return []string{}
 	}
 
-	// Try to extract bucket names using a regex.
-	// Common patterns: bucket-name, bucket.name, bucket_name, often followed by .s3.amazonaws.com
-	// We'll look for anything that could be a bucket name inside href or text.
-	// A simple but broad regex: matches word characters, dots, hyphens (typical bucket chars)
-	// but we need to avoid matching too much. We'll look for occurrences that are likely bucket names
-	// by checking if they appear near "s3.amazonaws.com" or in a list.
-	// This is heuristic and may need adjustment.
-
-	// First, find all potential bucket names (alphanumeric, dot, hyphen, at least 3 chars)
-	re := regexp.MustCompile(`[a-z0-9][a-z0-9.-]{2,}[a-z0-9]`)
-	potential := re.FindAllString(string(body), -1)
-
-	// Also look specifically for URLs pointing to S3
+	// Extract bucket names from S3 URLs
 	urlRe := regexp.MustCompile(`https?://([a-z0-9][a-z0-9.-]+[a-z0-9])\.s3\.amazonaws\.com`)
 	urlMatches := urlRe.FindAllStringSubmatch(string(body), -1)
+
+	// Also extract any string that looks like a bucket name
+	wordRe := regexp.MustCompile(`[a-z0-9][a-z0-9.-]{2,}[a-z0-9]`)
+	wordMatches := wordRe.FindAllString(string(body), -1)
 
 	unique := make(map[string]struct{})
 	for _, m := range urlMatches {
@@ -257,15 +247,14 @@ func fetchFromOsintSh(target string) []string {
 			unique[m[1]] = struct{}{}
 		}
 	}
-	for _, name := range potential {
-		// Filter out obviously wrong strings (too long, contains invalid chars)
-		if len(name) > 3 && len(name) < 64 && !strings.Contains(name, "..") && !strings.Contains(name, "--") {
+	for _, name := range wordMatches {
+		// Basic filtering: length 3-63, no ".." or "--"
+		if len(name) >= 3 && len(name) <= 63 && !strings.Contains(name, "..") && !strings.Contains(name, "--") {
 			unique[name] = struct{}{}
 		}
 	}
 
-	// Convert to slice
-	var result []string
+	result := make([]string, 0, len(unique))
 	for name := range unique {
 		result = append(result, name)
 	}
