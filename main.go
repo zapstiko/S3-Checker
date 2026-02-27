@@ -106,9 +106,9 @@ func printBanner(target string, total int, concurrency int, rate int) {
   |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
 
             s3-checker — S3 Bucket Discovery Tool
-                 s3-checker ` + version + `
-				 Developer - Abu Raihan Biswas
-				 Username - zapstiko
+                s3-checker ` + version + `
+		Developer - Abu Raihan Biswas
+		Username - zapstiko
 `
 	fmt.Println(banner)
 	fmt.Printf("[+] Target       : %s\n", target)
@@ -265,6 +265,7 @@ func worker(jobs <-chan string, wg *sync.WaitGroup, outFile *os.File, rate <-cha
 // ================= MAIN =================
 
 func main() {
+	// Define flags
 	target := flag.String("t", "", "Target name (required)")
 	wordlistPath := flag.String("w", "", "Custom wordlist")
 	outputPath := flag.String("o", "", "Output file")
@@ -272,8 +273,15 @@ func main() {
 	rateLimit := flag.Int("r", 0, "Rate limit (req/sec)")
 	exclude := flag.String("e", "", "Exclude status codes (comma-separated)")
 	flag.IntVar(&statusFilter, "s", 0, "Filter by status code")
+	showVersion := flag.Bool("v", false, "Show version and exit")
 
 	flag.Parse()
+
+	// Handle version flag
+	if *showVersion {
+		fmt.Printf("s3-checker %s\n", version)
+		os.Exit(0)
+	}
 
 	parseExclude(*exclude)
 
