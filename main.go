@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	_ "embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,6 +155,123 @@ var environments = []string{
 	"staging", "prod", "production", "test",
 }
 
+// GrayHatWarfare API response structure (simplified)
+type ghwResponse struct {
+	Buckets []struct {
+		BucketName string `json:"bucketName"`
+	} `json:"buckets"`
+}
+
+// fetchFromGrayHatWarfare queries the GrayHatWarfare API for buckets matching the target keyword.
+// Requires environment variable GHW_API_KEY to be set.
+func fetchFromGrayHatWarfare(target string) []string {
+	apiKey := os.Getenv("GHW_API_KEY")
+	if apiKey == "" {
+		// No API key, silently skip
+		return []string{}
+	}
+
+	url := fmt.Sprintf("https://buckets.grayhatwarfare.com/api/v1/buckets?access_token=%s&keywords=%s", apiKey, target)
+	resp, err := http.Get(url)
+	if err != nil {
+		// Optionally log error, but we'll just return empty
+		return []string{}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return []string{}
+	}
+
+	var result ghwResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return []string{}
+	}
+
+	var buckets []string
+	for _, b := range result.Buckets {
+		buckets = append(buckets, b.BucketName)
+	}
+	return buckets
+}
+
+// fetchFromOsintSh scrapes bucket names from osint.sh/buckets/ by submitting a search form.
+// Can be disabled by setting environment variable OSINT_SH_DISABLE=1.
+// Note: This is experimental and may break if the site structure changes.
+func fetchFromOsintSh(target string) []string {
+	if os.Getenv("OSINT_SH_DISABLE") == "1" {
+		return []string{}
+	}
+
+	// Prepare form data
+	formData := url.Values{
+		"keyword":   {target},
+		"extension": {""}, // optional, leave empty
+	}
+
+	// Create request
+	req, err := http.NewRequest("POST", "https://osint.sh/buckets/", strings.NewReader(formData.Encode()))
+	if err != nil {
+		return []string{}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "s3-checker/"+version)
+
+	// Send request with a timeout (use a separate client to avoid interfering with the global one)
+	scrapeClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := scrapeClient.Do(req)
+	if err != nil {
+		return []string{}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return []string{}
+	}
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return []string{}
+	}
+
+	// Try to extract bucket names using a regex.
+	// Common patterns: bucket-name, bucket.name, bucket_name, often followed by .s3.amazonaws.com
+	// We'll look for anything that could be a bucket name inside href or text.
+	// A simple but broad regex: matches word characters, dots, hyphens (typical bucket chars)
+	// but we need to avoid matching too much. We'll look for occurrences that are likely bucket names
+	// by checking if they appear near "s3.amazonaws.com" or in a list.
+	// This is heuristic and may need adjustment.
+
+	// First, find all potential bucket names (alphanumeric, dot, hyphen, at least 3 chars)
+	re := regexp.MustCompile(`[a-z0-9][a-z0-9.-]{2,}[a-z0-9]`)
+	potential := re.FindAllString(string(body), -1)
+
+	// Also look specifically for URLs pointing to S3
+	urlRe := regexp.MustCompile(`https?://([a-z0-9][a-z0-9.-]+[a-z0-9])\.s3\.amazonaws\.com`)
+	urlMatches := urlRe.FindAllStringSubmatch(string(body), -1)
+
+	unique := make(map[string]struct{})
+	for _, m := range urlMatches {
+		if len(m) >= 2 {
+			unique[m[1]] = struct{}{}
+		}
+	}
+	for _, name := range potential {
+		// Filter out obviously wrong strings (too long, contains invalid chars)
+		if len(name) > 3 && len(name) < 64 && !strings.Contains(name, "..") && !strings.Contains(name, "--") {
+			unique[name] = struct{}{}
+		}
+	}
+
+	// Convert to slice
+	var result []string
+	for name := range unique {
+		result = append(result, name)
+	}
+	return result
+}
+
 func loadEmbeddedWordlist() []string {
 	var lines []string
 	scanner := bufio.NewScanner(strings.NewReader(embeddedWordlist))
@@ -209,6 +329,14 @@ func generateWordlist(prefix string, words []string) []string {
 			unique[fmt.Sprintf(f, prefix, word)] = struct{}{}
 			unique[fmt.Sprintf(f, word, prefix)] = struct{}{}
 		}
+	}
+
+	// Add buckets discovered from online sources
+	for _, b := range fetchFromGrayHatWarfare(prefix) {
+		unique[b] = struct{}{}
+	}
+	for _, b := range fetchFromOsintSh(prefix) {
+		unique[b] = struct{}{}
 	}
 
 	var result []string
