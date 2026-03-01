@@ -112,8 +112,8 @@ The author assumes no liability for misuse.
 ### Acknowledgements
 ```
 Special thanks to the security community:
-	•	http://twitter.com/nahamsec
-	•	http://twitter.com/JobertAbma
+	• http://twitter.com/nahamsec
+	• http://twitter.com/JobertAbma
 
 ```
 
