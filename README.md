@@ -101,9 +101,9 @@ s3-checker/
 ### Security & Ethics
 ```
 This tool is intended strictly for authorized security testing and educational use.
-	•	Always obtain proper permission
-	•	Follow responsible disclosure
-	•	Respect applicable laws and policies
+	• Always obtain proper permission
+	• Follow responsible disclosure
+	• Respect applicable laws and policies
 
 The author assumes no liability for misuse.
 ````
