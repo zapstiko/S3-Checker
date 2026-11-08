@@ -85,6 +85,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 | [v1.3.1](https://github.com/zapstiko/S3-Checker/releases/tag/v1.3.1) | Legacy | GrayHatWarfare, osint.sh, `-v` |
 | [v1.3.0](https://github.com/zapstiko/S3-Checker/releases/tag/v1.3.0) | Legacy | Help menu, multi-code exclusion |
 | [v1.2.0](https://github.com/zapstiko/S3-Checker/releases/tag/v1.2.0) | Legacy | Earliest tagged release |
+| [v1.0.0](https://github.com/zapstiko/S3-Checker/releases/tag/v1.0.0) | Legacy | Initial public release |
 
 See [CHANGELOG.md](CHANGELOG.md) for details.
 

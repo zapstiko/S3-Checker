@@ -57,7 +57,7 @@ Final legacy release before v2.
 
 ## v1.2.0 — 2026-02-27
 
-Earliest tagged version in the repository history.
+Earliest explicitly versioned release.
 
 ### Included
 
@@ -66,3 +66,15 @@ Earliest tagged version in the repository history.
 - Custom wordlists
 - Concurrency and rate limiting
 - Status filters and file output
+
+## v1.0.0 — 2026-02-27
+
+Initial public release, reconstructed from the first commit `dc4418a`. The original README was titled **lazys3** and listed the changelog entry **“1.0 - Release.”**
+
+### Included
+
+- Target-aware bucket permutations
+- Bucket existence checks
+- Custom wordlist support
+- Output file support
+- Original 196-entry embedded prefix list
