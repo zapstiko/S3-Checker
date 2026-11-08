@@ -1,456 +1,569 @@
 package main
 
 import (
-	"bufio"
-	_ "embed"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
-	"regexp"
+	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"syscall"
 	"time"
 )
 
-//go:embed common_bucket_prefixes.txt
-var embeddedWordlist string
+const version = "v2.0.0"
 
-const version = "v1.3.1"
-
-// ================= COLORS =================
-
-const (
-	Red    = "\033[31m"
-	Green  = "\033[32m"
-	Yellow = "\033[33m"
-	Cyan   = "\033[36m"
-	Bold   = "\033[1m"
-	Reset  = "\033[0m"
-)
-
-func colorStatus(code int) string {
-	switch {
-	case code >= 200 && code < 300:
-		return Green
-	case code >= 300 && code < 400:
-		return Yellow
-	case code >= 400 && code < 500:
-		return Red
-	default:
-		return Cyan
-	}
-}
-
-// ================= GLOBALS =================
-
-var (
-	client        = &http.Client{Timeout: 6 * time.Second}
-	totalChecks   uint64
+// options holds the fully parsed runtime configuration.
+type options struct {
+	targets       []string
+	bucketNames   []string
+	domains       []string
+	wordlist      string
+	exact         bool
+	deep          bool
+	maxCandidates int
+	concurrency   int
+	rate          int
+	timeout       time.Duration
+	retries       int
+	proxy         string
+	provider      string
+	region        string
+	endpoint      string
+	perms         bool
+	objects       int
+	output        string
+	format        string
+	noColor       bool
+	noProgress    bool
+	quiet         bool
 	statusFilter  int
-	excludeStatus = map[int]struct{}{}
-)
-
-// ================= HELP MENU =================
-
-func init() {
-	flag.Usage = func() {
-		fmt.Println(Bold + "s3-checker " + version + Reset)
-		fmt.Println("Fast AWS S3 bucket discovery tool\n")
-
-		fmt.Println(Bold + "Usage:" + Reset)
-		fmt.Println("  s3-checker -t <target> [options]\n")
-
-		fmt.Println(Bold + "Options:" + Reset)
-		flag.PrintDefaults()
-
-		fmt.Println("\n" + Bold + "Examples:" + Reset)
-		fmt.Println("  s3-checker -t example")
-		fmt.Println("  s3-checker -t example -c 200")
-		fmt.Println("  s3-checker -t example -r 50")
-		fmt.Println("  s3-checker -t example -s 200")
-		fmt.Println("  s3-checker -t example -e 403")
-		fmt.Println("  s3-checker -t example -w words.txt -o hits.txt")
-	}
+	exclude       map[int]struct{}
+	osint         bool
+	userAgent     string
+	showVersion   bool
+	followRegion  bool
+	takeoverAll   bool
+	prov          Provider
+	objectKeys    []string
 }
 
-// ================= PARSE EXCLUDE =================
-
-func parseExclude(input string) {
-	if input == "" {
+func main() {
+	opts := parseFlags()
+	if opts.showVersion {
+		fmt.Printf("s3-checker %s\n", version)
 		return
 	}
-	parts := strings.Split(input, ",")
-	for _, p := range parts {
-		code, err := strconv.Atoi(strings.TrimSpace(p))
-		if err == nil {
-			excludeStatus[code] = struct{}{}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	components, err := loadEmbeddedComponents()
+	if err != nil {
+		fatalf("loading embedded wordlists: %v", err)
+	}
+	opts.objectKeys = components.objects
+
+	words := components.common
+	if opts.wordlist != "" {
+		words, err = loadWordlist(opts.wordlist)
+		if err != nil {
+			fatalf("loading wordlist: %v", err)
 		}
+		if len(words) == 0 {
+			fatalf("wordlist %q contains no usable entries", opts.wordlist)
+		}
+	}
+
+	if opts.exact && opts.wordlist == "" {
+		fatalf("--exact requires -w/--wordlist")
+	}
+	if len(opts.targets) == 0 && len(opts.bucketNames) == 0 && !opts.exact && len(opts.domains) == 0 {
+		printUsage()
+		fatalf("no input supplied: use -t, -tL, -b, -bL, -w --exact, or -d")
+	}
+
+	reporter, err := newReporter(opts)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer reporter.Close()
+
+	var candidates []string
+	candidates = append(candidates, opts.bucketNames...)
+
+	switch {
+	case opts.exact:
+		candidates = append(candidates, words...)
+	case len(opts.targets) > 0:
+		baseWords := words
+		if opts.deep {
+			if opts.wordlist == "" {
+				baseWords = mergeUnique(components.common, components.services)
+			}
+			baseWords = mergeUnique(baseWords, deepSuffixes)
+		}
+		for _, target := range opts.targets {
+			candidates = append(candidates, generateTargetCandidates(target, baseWords, components.envs, opts.deep)...)
+			candidates = append(candidates, gatherOSINT(ctx, target, opts.osint, opts.quiet, opts.userAgent)...)
+		}
+	}
+
+	candidates = normalizeCandidates(candidates)
+	sort.Strings(candidates)
+
+	if opts.maxCandidates > 0 && len(candidates) > opts.maxCandidates {
+		if !opts.quiet {
+			fmt.Fprintf(os.Stderr, "[!] Candidate cap reached: using %d of %d candidates\n", opts.maxCandidates, len(candidates))
+		}
+		candidates = candidates[:opts.maxCandidates]
+	}
+
+	if len(candidates) == 0 && len(opts.domains) == 0 {
+		fatalf("no valid bucket candidates were generated")
+	}
+
+	printBanner(opts, len(candidates))
+	if len(candidates) > 100000 && !opts.quiet {
+		fmt.Fprintf(os.Stderr, "[!] Large candidate set (%d). Consider -r, --max-candidates, or a narrower wordlist.\n", len(candidates))
+	}
+
+	checker := NewChecker(opts)
+	start := time.Now()
+
+	if len(candidates) > 0 {
+		runBucketScan(ctx, checker, reporter, candidates, opts.concurrency)
+	}
+	if len(opts.domains) > 0 && ctx.Err() == nil {
+		runTakeoverScan(ctx, checker, reporter, opts.domains, opts.concurrency)
+	}
+
+	reporter.Summary(time.Since(start))
+	reporter.Close()
+
+	if ctx.Err() != nil {
+		os.Exit(130)
 	}
 }
 
-func isExcluded(code int) bool {
-	_, ok := excludeStatus[code]
-	return ok
+// parseFlags registers short and long aliases for every option and resolves inputs.
+func parseFlags() *options {
+	var (
+		target, targetList         string
+		buckets, bucketList        string
+		domains                    string
+		wordlist                   string
+		output, format             string
+		proxy, provider, region    string
+		endpoint, userAgent        string
+		exclude                    string
+		exact, deep                bool
+		perms, osint               bool
+		noColor, noProgress, quiet bool
+		jsonOut, showVersion       bool
+		followRegion, takeoverAll  bool
+		maxCandidates, concurrency int
+		rate, retries, objects     int
+		statusFilter               int
+		timeout                    time.Duration
+	)
+
+	// Target input.
+	flag.StringVar(&target, "t", "", "target brand/domain (comma-separated)")
+	flag.StringVar(&target, "target", "", "target brand/domain (comma-separated)")
+	flag.StringVar(&targetList, "tL", "", "file containing targets")
+	flag.StringVar(&targetList, "target-list", "", "file containing targets")
+	flag.StringVar(&buckets, "b", "", "exact bucket names (comma-separated)")
+	flag.StringVar(&buckets, "buckets", "", "exact bucket names (comma-separated)")
+	flag.StringVar(&bucketList, "bL", "", "file containing exact bucket names")
+	flag.StringVar(&bucketList, "bucket-list", "", "file containing exact bucket names")
+	flag.StringVar(&domains, "d", "", "domain (or file) for S3 takeover checks")
+
+	// Wordlist / permutation.
+	flag.StringVar(&wordlist, "w", "", "custom wordlist (file, URL, or - for stdin)")
+	flag.StringVar(&wordlist, "wordlist", "", "custom wordlist (file, URL, or - for stdin)")
+	flag.BoolVar(&exact, "exact", false, "treat wordlist entries as exact bucket names")
+	flag.BoolVar(&deep, "deep", false, "deep permutations (services, years, regions, numbers)")
+	flag.IntVar(&maxCandidates, "max-candidates", 0, "cap candidate count (0 = unlimited)")
+
+	// Scanning.
+	flag.IntVar(&concurrency, "c", 50, "worker concurrency")
+	flag.IntVar(&concurrency, "concurrency", 50, "worker concurrency")
+	flag.IntVar(&rate, "r", 0, "global requests/sec (0 = unlimited)")
+	flag.IntVar(&rate, "rate", 0, "global requests/sec (0 = unlimited)")
+	flag.DurationVar(&timeout, "timeout", 8*time.Second, "per-request timeout")
+	flag.IntVar(&retries, "retries", 2, "retries for transient failures")
+	flag.StringVar(&proxy, "proxy", "", "proxy URL (or use HTTP(S)_PROXY)")
+	flag.StringVar(&provider, "provider", "aws", "aws|do|wasabi|linode|b2|scaleway|gcs|custom")
+	flag.StringVar(&region, "region", "", "provider region")
+	flag.StringVar(&endpoint, "endpoint", "", "custom endpoint; supports {bucket} and {region}")
+	flag.BoolVar(&perms, "p", false, "enumerate ACL/policy/CORS/website and object exposure")
+	flag.BoolVar(&perms, "perms", false, "enumerate ACL/policy/CORS/website and object exposure")
+	flag.IntVar(&objects, "objects", 10, "max objects to list/probe in perms mode")
+	flag.BoolVar(&followRegion, "follow-region", true, "follow S3 region redirects")
+	flag.BoolVar(&osint, "osint", false, "enable free OSINT enrichment (crt.sh, osint.sh)")
+	flag.StringVar(&userAgent, "user-agent", "", "custom User-Agent")
+
+	// Output.
+	flag.StringVar(&output, "o", "", "output file")
+	flag.StringVar(&output, "output", "", "output file")
+	flag.StringVar(&format, "f", "console", "output format: console|json|jsonl|csv")
+	flag.StringVar(&format, "format", "console", "output format: console|json|jsonl|csv")
+	flag.BoolVar(&jsonOut, "json", false, "shorthand for -f jsonl")
+	flag.IntVar(&statusFilter, "s", 0, "only show this HTTP status")
+	flag.IntVar(&statusFilter, "status", 0, "only show this HTTP status")
+	flag.StringVar(&exclude, "e", "", "exclude HTTP status codes (comma-separated)")
+	flag.StringVar(&exclude, "exclude", "", "exclude HTTP status codes (comma-separated)")
+	flag.BoolVar(&noColor, "no-color", false, "disable colors")
+	flag.BoolVar(&noProgress, "no-progress", false, "disable progress line")
+	flag.BoolVar(&quiet, "quiet", false, "suppress banner, progress, and summary")
+	flag.BoolVar(&takeoverAll, "takeover-all", false, "show non-vulnerable takeover results")
+	flag.BoolVar(&showVersion, "v", false, "print version")
+	flag.BoolVar(&showVersion, "version", false, "print version")
+
+	flag.Usage = printUsage
+	flag.Parse()
+
+	if showVersion {
+		return &options{showVersion: true}
+	}
+	if jsonOut {
+		format = "jsonl"
+	}
+	format = normalizeFormat(format)
+	if format == "" {
+		fatalf("unsupported output format")
+	}
+	if concurrency < 1 || concurrency > 2000 {
+		fatalf("concurrency must be between 1 and 2000")
+	}
+	if rate < 0 || rate > 1000000 {
+		fatalf("rate must be between 0 and 1000000")
+	}
+	if timeout <= 0 {
+		fatalf("timeout must be positive")
+	}
+	if retries < 0 || retries > 20 {
+		fatalf("retries must be between 0 and 20")
+	}
+	if objects < 0 {
+		fatalf("objects must be >= 0")
+	}
+	if maxCandidates < 0 {
+		fatalf("max-candidates must be >= 0")
+	}
+	if proxy != "" {
+		u, err := url.Parse(proxy)
+		if err != nil || u.Host == "" {
+			fatalf("invalid --proxy %q", proxy)
+		}
+	}
+	if userAgent == "" {
+		userAgent = fmt.Sprintf("s3-checker/%s (+https://github.com/zapstiko/S3-Checker)", version)
+	}
+
+	prov, err := resolveProvider(provider, endpoint, region)
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	opts := &options{
+		wordlist:      wordlist,
+		exact:         exact,
+		deep:          deep,
+		maxCandidates: maxCandidates,
+		concurrency:   concurrency,
+		rate:          rate,
+		timeout:       timeout,
+		retries:       retries,
+		proxy:         proxy,
+		provider:      prov.Name,
+		region:        region,
+		endpoint:      endpoint,
+		perms:         perms,
+		objects:       objects,
+		output:        output,
+		format:        format,
+		noColor:       noColor,
+		noProgress:    noProgress,
+		quiet:         quiet,
+		statusFilter:  statusFilter,
+		exclude:       parseExcludeSet(exclude),
+		osint:         osint,
+		userAgent:     userAgent,
+		followRegion:  followRegion,
+		takeoverAll:   takeoverAll,
+		prov:          prov,
+	}
+
+	opts.targets, err = collectValues(target, targetList)
+	if err != nil {
+		fatalf("reading targets: %v", err)
+	}
+	opts.bucketNames, err = collectValues(buckets, bucketList)
+	if err != nil {
+		fatalf("reading bucket list: %v", err)
+	}
+	opts.domains, err = collectDomains(domains)
+	if err != nil {
+		fatalf("reading domain list: %v", err)
+	}
+	return opts
 }
 
-// ================= BANNER =================
+func normalizeFormat(f string) string {
+	switch strings.ToLower(strings.TrimSpace(f)) {
+	case "", "console", "text", "txt":
+		return "console"
+	case "json":
+		return "json"
+	case "jsonl", "ndjson":
+		return "jsonl"
+	case "csv":
+		return "csv"
+	default:
+		return ""
+	}
+}
 
-func printBanner(target string, total int, concurrency int, rate int) {
+func parseExcludeSet(input string) map[int]struct{} {
+	out := make(map[int]struct{})
+	for _, part := range strings.Split(input, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if code, err := strconv.Atoi(part); err == nil {
+			out[code] = struct{}{}
+		}
+	}
+	return out
+}
+
+// collectValues merges a comma-separated value with an optional file.
+func collectValues(csvValue, filePath string) ([]string, error) {
+	var out []string
+	if csvValue != "" {
+		for _, part := range strings.Split(csvValue, ",") {
+			if v := strings.TrimSpace(part); v != "" {
+				out = append(out, v)
+			}
+		}
+	}
+	if filePath != "" {
+		lines, err := readLinesFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, lines...)
+	}
+	return dedupeStrings(out), nil
+}
+
+// collectDomains accepts a comma-separated list, a file path, or a single domain.
+func collectDomains(value string) ([]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	if fi, err := os.Stat(value); err == nil && !fi.IsDir() {
+		lines, err := readLinesFile(value)
+		if err != nil {
+			return nil, err
+		}
+		return dedupeStrings(lines), nil
+	}
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return dedupeStrings(out), nil
+}
+
+func runBucketScan(ctx context.Context, checker *Checker, reporter *Reporter, candidates []string, concurrency int) {
+	jobs := make(chan string, concurrency*2)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case bucket, ok := <-jobs:
+					if !ok {
+						return
+					}
+					res := checker.Check(ctx, bucket)
+					if ctx.Err() != nil {
+						return
+					}
+					reporter.ReportBucket(res)
+					reporter.Tick()
+				}
+			}
+		}()
+	}
+
+feed:
+	for _, bucket := range candidates {
+		select {
+		case <-ctx.Done():
+			break feed
+		case jobs <- bucket:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func runTakeoverScan(ctx context.Context, checker *Checker, reporter *Reporter, domains []string, concurrency int) {
+	if concurrency > 32 {
+		concurrency = 32
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	jobs := make(chan string, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case domain, ok := <-jobs:
+					if !ok {
+						return
+					}
+					res := checker.DetectTakeover(ctx, domain)
+					if ctx.Err() != nil {
+						return
+					}
+					reporter.ReportTakeover(res)
+				}
+			}
+		}()
+	}
+
+feed:
+	for _, domain := range domains {
+		select {
+		case <-ctx.Done():
+			break feed
+		case jobs <- domain:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func printBanner(opts *options, candidateCount int) {
+	if opts.quiet {
+		return
+	}
 	banner := `    ____   _____      _____ _               _
   / ___| |___ /     / ____| |__   ___  ___| | _____ _ __
   \___ \   |_ \____| |    | '_ \ / _ \/ __| |/ / _ \ '__|
    ___) | ___) |____| |___ | | | |  __/ (__|   <  __/ |
   |____/ |____/      \____||_| |_|\___|\___|_|\_\___|_|
 
-            s3-checker — S3 Bucket Discovery Tool
-		Developer - Abu Raihan Biswas
-		Username - zapstiko
-` + "                 s3-checker " + version + "\n"
-
-	fmt.Println(banner)
-	fmt.Printf("[+] Target       : %s\n", target)
-	fmt.Printf("[+] Candidates   : %d\n", total)
-	fmt.Printf("[+] Concurrency  : %d\n", concurrency)
-
-	if rate > 0 {
-		fmt.Printf("[+] Rate limit   : %d req/sec\n", rate)
+     s3-checker v2 — S3 Discovery & Exposure Audit
+     Developer - Abu Raihan Biswas (zapstiko)
+`
+	fmt.Fprintln(os.Stderr, banner)
+	fmt.Fprintf(os.Stderr, "[+] Provider       : %s\n", opts.provider)
+	fmt.Fprintf(os.Stderr, "[+] Targets        : %d\n", len(opts.targets))
+	fmt.Fprintf(os.Stderr, "[+] Candidates     : %d\n", candidateCount)
+	fmt.Fprintf(os.Stderr, "[+] Domains        : %d\n", len(opts.domains))
+	fmt.Fprintf(os.Stderr, "[+] Concurrency    : %d\n", opts.concurrency)
+	if opts.rate > 0 {
+		fmt.Fprintf(os.Stderr, "[+] Rate limit     : %d req/sec\n", opts.rate)
 	} else {
-		fmt.Printf("[+] Rate limit   : disabled\n")
+		fmt.Fprintf(os.Stderr, "[+] Rate limit     : disabled\n")
 	}
-
-	if statusFilter != 0 {
-		fmt.Printf("[+] Status filter: %d\n", statusFilter)
+	if opts.perms {
+		fmt.Fprintf(os.Stderr, "[+] Permissions    : enumeration enabled (read-only)\n")
 	}
-	if len(excludeStatus) > 0 {
-		fmt.Printf("[+] Exclude codes: enabled\n")
+	if opts.statusFilter != 0 {
+		fmt.Fprintf(os.Stderr, "[+] Status filter  : %d\n", opts.statusFilter)
 	}
-
-	fmt.Println()
+	if len(opts.exclude) > 0 {
+		fmt.Fprintf(os.Stderr, "[+] Exclude codes  : enabled\n")
+	}
+	fmt.Fprintln(os.Stderr)
 }
 
-// ================= S3 CHECK =================
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `s3-checker %s
+Fast AWS S3 bucket discovery, permission auditing, and takeover detection.
 
-func checkBucket(bucket string) (bool, int, string) {
-	url := fmt.Sprintf("http://%s.s3.amazonaws.com", bucket)
+Usage:
+  s3-checker -t <target> [options]
+  s3-checker -b <bucket[,bucket...]> [options]
+  s3-checker -w <file|url> --exact [options]
+  s3-checker -d <domain|file> [options]
 
-	resp, err := client.Get(url)
-	if err != nil {
-		return false, 0, url
-	}
-	defer resp.Body.Close()
+Target input:
+  -t,  --target string        Target brand/domain (comma-separated)
+  -tL, --target-list file     File containing targets
+  -b,  --buckets string       Exact bucket names (comma-separated)
+  -bL, --bucket-list file     File containing exact bucket names
+  -d,  --domains string       Domain or file for S3 takeover checks
 
-	code := resp.StatusCode
-	return code != 404, code, url
+Wordlist:
+  -w,  --wordlist string      Custom wordlist (file, URL, or - for stdin)
+       --exact                Treat wordlist entries as exact bucket names
+       --deep                 Deep permutations (services, years, regions, numbers)
+       --max-candidates int   Cap candidate count (0 = unlimited)
+
+Scanning:
+  -c,  --concurrency int      Workers (default 50)
+  -r,  --rate int             Global requests/sec (0 = unlimited)
+       --timeout duration     Per-request timeout (default 8s)
+       --retries int          Retries for transient failures (default 2)
+       --proxy string         Proxy URL (or HTTP(S)_PROXY)
+       --provider string      aws|do|wasabi|linode|b2|scaleway|gcs|custom
+       --region string        Provider region
+       --endpoint string      Custom endpoint; supports {bucket} and {region}
+  -p,  --perms                Enumerate ACL/policy/CORS/website and object exposure
+       --objects int          Max objects to list/probe in perms mode (0 disables, default 10)
+       --osint                Enable free OSINT enrichment (crt.sh, osint.sh)
+       --follow-region        Follow S3 region redirects (default true)
+       --user-agent string    Custom User-Agent
+
+Output:
+  -o,  --output string        Output file
+  -f,  --format string        console|json|jsonl|csv (default console)
+       --json                 Shorthand for -f jsonl
+  -s,  --status int           Only show this HTTP status
+  -e,  --exclude string       Exclude HTTP status codes (comma-separated)
+       --quiet                Suppress banner, progress, and summary
+       --no-progress          Disable progress line
+       --no-color             Disable colors
+       --takeover-all         Show non-vulnerable takeover results
+  -v,  --version              Print version
+
+Examples:
+  s3-checker -t example
+  s3-checker -t example -p -r 25
+  s3-checker -w https://raw.githubusercontent.com/zapstiko/S3-Checker/main/wordlists/s3-buckets-master.txt --exact
+  s3-checker -b my-bucket,another-bucket -p -f json -o findings.json
+  s3-checker -d domains.txt --takeover-all
+`, version)
 }
 
-// ================= WORDLIST =================
-
-var environments = []string{
-	"dev", "development", "stage", "s3",
-	"staging", "prod", "production", "test",
-}
-
-// GrayHatWarfare API response structure (simplified)
-type ghwResponse struct {
-	Buckets []struct {
-		BucketName string `json:"bucketName"`
-	} `json:"buckets"`
-}
-
-// fetchFromGrayHatWarfare queries the GrayHatWarfare API for buckets matching the target keyword.
-// Requires environment variable GHW_API_KEY to be set.
-func fetchFromGrayHatWarfare(target string) []string {
-	apiKey := os.Getenv("GHW_API_KEY")
-	if apiKey == "" {
-		return []string{} // silently skip
-	}
-
-	url := fmt.Sprintf("https://buckets.grayhatwarfare.com/api/v1/buckets?access_token=%s&keywords=%s", apiKey, target)
-	resp, err := http.Get(url)
-	if err != nil {
-		return []string{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return []string{}
-	}
-
-	var result ghwResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return []string{}
-	}
-
-	var buckets []string
-	for _, b := range result.Buckets {
-		buckets = append(buckets, b.BucketName)
-	}
-	return buckets
-}
-
-// fetchFromOsintSh scrapes bucket names from osint.sh/buckets/ by submitting a search form.
-// Can be disabled by setting environment variable OSINT_SH_DISABLE=1.
-// Note: This is experimental and may break if the site structure changes.
-func fetchFromOsintSh(target string) []string {
-	if os.Getenv("OSINT_SH_DISABLE") == "1" {
-		return []string{}
-	}
-
-	// Prepare form data
-	formData := url.Values{
-		"keyword":   {target},
-		"extension": {""},
-	}
-
-	// Create request
-	req, err := http.NewRequest("POST", "https://osint.sh/buckets/", strings.NewReader(formData.Encode()))
-	if err != nil {
-		return []string{}
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "s3-checker/"+version)
-
-	// Use a separate client with a timeout
-	scrapeClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := scrapeClient.Do(req)
-	if err != nil {
-		return []string{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return []string{}
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return []string{}
-	}
-
-	// Extract bucket names from S3 URLs
-	urlRe := regexp.MustCompile(`https?://([a-z0-9][a-z0-9.-]+[a-z0-9])\.s3\.amazonaws\.com`)
-	urlMatches := urlRe.FindAllStringSubmatch(string(body), -1)
-
-	// Also extract any string that looks like a bucket name
-	wordRe := regexp.MustCompile(`[a-z0-9][a-z0-9.-]{2,}[a-z0-9]`)
-	wordMatches := wordRe.FindAllString(string(body), -1)
-
-	unique := make(map[string]struct{})
-	for _, m := range urlMatches {
-		if len(m) >= 2 {
-			unique[m[1]] = struct{}{}
-		}
-	}
-	for _, name := range wordMatches {
-		// Basic filtering: length 3-63, no ".." or "--"
-		if len(name) >= 3 && len(name) <= 63 && !strings.Contains(name, "..") && !strings.Contains(name, "--") {
-			unique[name] = struct{}{}
-		}
-	}
-
-	result := make([]string, 0, len(unique))
-	for name := range unique {
-		result = append(result, name)
-	}
-	return result
-}
-
-func loadEmbeddedWordlist() []string {
-	var lines []string
-	scanner := bufio.NewScanner(strings.NewReader(embeddedWordlist))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
-}
-
-func loadCustomWordlist(path string) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines, scanner.Err()
-}
-
-func generateWordlist(prefix string, words []string) []string {
-	unique := make(map[string]struct{})
-	unique[prefix] = struct{}{}
-
-	envFormats := []string{
-		"%s-%s-%s",
-		"%s-%s.%s",
-		"%s-%s%s",
-		"%s.%s-%s",
-		"%s.%s.%s",
-	}
-
-	hostFormats := []string{"%s.%s", "%s-%s", "%s%s"}
-
-	for _, word := range words {
-		for _, env := range environments {
-			for _, f := range envFormats {
-				unique[fmt.Sprintf(f, prefix, word, env)] = struct{}{}
-			}
-		}
-	}
-
-	for _, word := range words {
-		for _, f := range hostFormats {
-			unique[fmt.Sprintf(f, prefix, word)] = struct{}{}
-			unique[fmt.Sprintf(f, word, prefix)] = struct{}{}
-		}
-	}
-
-	// Add buckets discovered from online sources
-	for _, b := range fetchFromGrayHatWarfare(prefix) {
-		unique[b] = struct{}{}
-	}
-	for _, b := range fetchFromOsintSh(prefix) {
-		unique[b] = struct{}{}
-	}
-
-	var result []string
-	for k := range unique {
-		result = append(result, k)
-	}
-	return result
-}
-
-// ================= WORKER =================
-
-func worker(jobs <-chan string, wg *sync.WaitGroup, outFile *os.File, rate <-chan time.Time) {
-	defer wg.Done()
-
-	for bucket := range jobs {
-		if rate != nil {
-			<-rate
-		}
-
-		exists, code, url := checkBucket(bucket)
-		atomic.AddUint64(&totalChecks, 1)
-
-		fmt.Printf("\r[+] Checked: %d", atomic.LoadUint64(&totalChecks))
-
-		if !exists {
-			continue
-		}
-		if statusFilter != 0 && code != statusFilter {
-			continue
-		}
-		if isExcluded(code) {
-			continue
-		}
-
-		color := colorStatus(code)
-
-		line := fmt.Sprintf(
-			"%s [%s%d%s] [S3 Bucket Found]",
-			url,
-			color,
-			code,
-			Reset,
-		)
-
-		fmt.Printf("\r%s\n", line)
-
-		if outFile != nil {
-			outFile.WriteString(line + "\n")
-		}
-	}
-}
-
-// ================= MAIN =================
-
-func main() {
-	// Define flags
-	target := flag.String("t", "", "Target name (required)")
-	wordlistPath := flag.String("w", "", "Custom wordlist")
-	outputPath := flag.String("o", "", "Output file")
-	concurrency := flag.Int("c", 50, "Concurrency (workers)")
-	rateLimit := flag.Int("r", 0, "Rate limit (req/sec)")
-	exclude := flag.String("e", "", "Exclude status codes (comma-separated)")
-	flag.IntVar(&statusFilter, "s", 0, "Filter by status code")
-	showVersion := flag.Bool("v", false, "Show version and exit")
-
-	flag.Parse()
-
-	// Handle version flag
-	if *showVersion {
-		fmt.Printf("s3-checker %s\n", version)
-		os.Exit(0)
-	}
-
-	parseExclude(*exclude)
-
-	if *target == "" {
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	var words []string
-	var err error
-
-	if *wordlistPath != "" {
-		words, err = loadCustomWordlist(*wordlistPath)
-		if err != nil {
-			fmt.Println("Error loading wordlist:", err)
-			os.Exit(1)
-		}
-	} else {
-		words = loadEmbeddedWordlist()
-	}
-
-	wordlist := generateWordlist(*target, words)
-
-	printBanner(*target, len(wordlist), *concurrency, *rateLimit)
-
-	var outFile *os.File
-	if *outputPath != "" {
-		outFile, err = os.Create(*outputPath)
-		if err != nil {
-			fmt.Println("Error creating output file:", err)
-			os.Exit(1)
-		}
-		defer outFile.Close()
-	}
-
-	var rate <-chan time.Time
-	if *rateLimit > 0 {
-		rate = time.Tick(time.Second / time.Duration(*rateLimit))
-	}
-
-	jobs := make(chan string, *concurrency)
-	var wg sync.WaitGroup
-
-	for i := 0; i < *concurrency; i++ {
-		wg.Add(1)
-		go worker(jobs, &wg, outFile, rate)
-	}
-
-	for _, bucket := range wordlist {
-		jobs <- bucket
-	}
-	close(jobs)
-
-	wg.Wait()
-	fmt.Printf("\n\nDone. Checked %d buckets.\n", totalChecks)
+func fatalf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[!] "+format+"\n", args...)
+	os.Exit(1)
 }

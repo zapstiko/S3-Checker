@@ -1,0 +1,13 @@
+# Binaries
+/s3-checker
+/s3-checker.exe
+/dist/
+
+# Local scan output
+/results.json
+/results.jsonl
+/results.csv
+/findings.json
+/findings.jsonl
+/findings.csv
+*.log
