@@ -1,5 +1,9 @@
 # S3 Checker
 
+[![CI](https://github.com/zapstiko/S3-Checker/actions/workflows/ci.yml/badge.svg)](https://github.com/zapstiko/S3-Checker/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/zapstiko/S3-Checker)](https://github.com/zapstiko/S3-Checker/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Fast, focused AWS S3 bucket discovery, exposure auditing, and subdomain-takeover detection written in Go.
 
 S3 Checker generates high-probability bucket names for a target, validates them, detects the bucket's region, classifies anonymous access, and can enumerate readable bucket configuration. It also finds dangling S3 CNAMEs and ships a large, shareable wordlist built for community use.
@@ -46,6 +50,14 @@ s3-checker -t example -p
 ## Installation
 
 Requires Go 1.25 or newer.
+
+### Prebuilt binaries
+
+Download macOS, Linux, and Windows binaries from the
+[latest release](https://github.com/zapstiko/S3-Checker/releases/latest)
+(checksums are attached to every release).
+
+### Using Go
 
 ```bash
 go install github.com/zapstiko/s3-checker@latest
@@ -118,7 +130,8 @@ A public gist mirror of the master list is also available:
 https://gist.github.com/zapstiko/f6df988598003a08a24e22dd14533246
 ```
 
-The gist is a snapshot; the repository file is the canonical version.
+The gist is a snapshot; the repository file is the canonical version. Both generated lists are also attached to the
+[v2.0.0 release](https://github.com/zapstiko/S3-Checker/releases/tag/v2.0.0).
 
 Use the master list as exact candidates. `--exact` ignores target-derived permutations and scans each wordlist entry as-is:
 
