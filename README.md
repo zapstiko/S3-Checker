@@ -77,6 +77,17 @@ Optionally:
 export PATH=$PATH:$(go env GOPATH)/bin
 ```
 
+## Releases
+
+| Version | Status | Highlights |
+|---|---|---|
+| [v2.0.0](https://github.com/zapstiko/S3-Checker/releases/tag/v2.0.0) | Latest | Permissions, takeover detection, providers, structured output, 87k wordlist |
+| [v1.3.1](https://github.com/zapstiko/S3-Checker/releases/tag/v1.3.1) | Legacy | GrayHatWarfare, osint.sh, `-v` |
+| [v1.3.0](https://github.com/zapstiko/S3-Checker/releases/tag/v1.3.0) | Legacy | Help menu, multi-code exclusion |
+| [v1.2.0](https://github.com/zapstiko/S3-Checker/releases/tag/v1.2.0) | Legacy | Earliest tagged release |
+
+See [CHANGELOG.md](CHANGELOG.md) for details.
+
 ## Quick start
 
 ```bash
@@ -348,6 +359,7 @@ S3-Checker/
 │   └── s3-buckets-master.txt  Generated, ~87k exact names
 ├── scripts/build-wordlists.sh Wordlist generator and CI check
 ├── Makefile                   build/test/check helpers
+├── CHANGELOG.md               release history
 └── main_test.go
 ```
 
